@@ -4,7 +4,9 @@ const STAGES = [
   ["transcribe", "Transcribe"],
   ["extract", "Extract"],
   ["import", "Import"],
+  ["clean", "Clean"],
 ];
+const POST_STAGES = new Set(["metadata", "download", "transcribe", "extract"]);
 const STAGE_INDEX = Object.fromEntries(STAGES.map(([k], i) => [k, i]));
 const STAGE_LABEL = Object.fromEntries(STAGES);
 const STATUS_LABEL = {
@@ -14,6 +16,7 @@ const STATUS_LABEL = {
   failed: "Failed",
   cancelled: "Cancelled",
 };
+const SOURCE_LABEL = { social: "Social post", web: "Recipe website" };
 const PLATFORM_EMOJI = { TikTok: "🎵", Instagram: "📸", YouTube: "▶️", Facebook: "📘", Pinterest: "📌" };
 
 const state = {
@@ -86,6 +89,13 @@ function thumb(j) {
 
 // ── Stage stepper ──────────────────────────────────────────────
 
+// Web jobs are scraped by Mealie unless they fell back to the post pipeline.
+const isWeb = (j) => j.source === "web" && (!j.media_kind || j.media_kind === "web") && !POST_STAGES.has(j.stage) && !POST_STAGES.has(j.error_stage);
+
+function stagesFor(j) {
+  return STAGES.filter(([key]) => (key !== "clean" || state.config.cleanup) && !(isWeb(j) && POST_STAGES.has(key)));
+}
+
 function stepState(j, key) {
   const idx = STAGE_INDEX[key];
   const skippable = key === "download" || key === "transcribe";
@@ -107,7 +117,7 @@ function stepState(j, key) {
 }
 
 function stepper(j) {
-  return `<div class="steps">${STAGES.map(([key, label]) => {
+  return `<div class="steps">${stagesFor(j).map(([key, label]) => {
     const s = stepState(j, key);
     let track = "";
     if (s === "active") {
@@ -262,7 +272,8 @@ function logLine(e) {
   return `<li class="${esc(e.level)}"><span class="t">${clock(e.at)}</span><span class="s">${esc(STAGE_LABEL[e.stage] || "")}</span><span class="m">${esc(e.message)}</span></li>`;
 }
 
-function recipeView(r) {
+function recipeView(r, j) {
+  if (!r && isWeb(j)) return `<p class="muted">Mealie scraped this page directly${j.mealie_slug ? " — open it in Mealie to see the recipe" : ""}.</p>`;
   if (!r) return `<p class="muted">The recipe appears here once the extract stage finishes.</p>`;
   const facts = [
     r.recipeYield && `🍽 ${r.recipeYield}`,
@@ -286,7 +297,7 @@ function panelContent(d) {
   const j = d.job;
   switch (state.panel) {
     case "recipe":
-      return recipeView(j.recipe_json);
+      return recipeView(j.recipe_json, j);
     case "transcript":
       return j.transcript ? `<div class="prose">${esc(j.transcript)}</div>` : `<p class="muted">${j.media_kind && j.media_kind !== "video" ? "This post has no audio to transcribe." : "No transcript yet."}</p>`;
     case "caption":
@@ -306,6 +317,7 @@ function renderDrawer() {
     actions.push(`<button class="btn small" data-act="retry"><svg class="icon"><use href="#i-retry"/></svg> Retry</button>`);
     actions.push(`<button class="btn small ghost" data-act="retry-fresh" title="Discard cached transcript and recipe">Retry from scratch</button>`);
   }
+  if (j.status === "succeeded" && state.config.cleanup) actions.push(`<button class="btn small ghost" data-act="retry" title="Clean the Mealie recipe again">Re-run cleanup</button>`);
   if (j.status === "succeeded") actions.push(`<button class="btn small ghost" data-act="retry-fresh">Re-import</button>`);
   if (j.status === "queued" || j.status === "running") actions.push(`<button class="btn small danger" data-act="cancel"><svg class="icon"><use href="#i-stop"/></svg> Cancel</button>`);
   else actions.push(`<button class="btn small ghost danger" data-act="delete"><svg class="icon"><use href="#i-trash"/></svg> Remove</button>`);
@@ -314,6 +326,7 @@ function renderDrawer() {
   const meta = [
     ["Status", STATUS_LABEL[j.status]],
     ["Attempts", j.attempts],
+    ["Source", SOURCE_LABEL[j.source] || j.source || "—"],
     ["Platform", j.platform || "—"],
     ["Media", j.media_kind || "—"],
     ["Length", j.duration_secs ? duration(j.duration_secs * 1000) : "—"],
@@ -455,7 +468,7 @@ async function submitJob({ force = false } = {}) {
   try {
     const job = await api("/api/jobs", {
       method: "POST",
-      body: JSON.stringify({ url, tags: state.tags, note: $("#note").value, force }),
+      body: JSON.stringify({ url, tags: state.tags, note: $("#note").value, source: $("#source").value, force }),
     });
     state.jobs.set(job.id, job);
     $("#url").value = "";

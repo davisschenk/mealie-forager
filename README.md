@@ -1,12 +1,21 @@
 # Mealie Forager
 
-Turns recipe posts from TikTok, Instagram, YouTube, and similar sites into Mealie
-recipes. It's a Rust (axum + SQLite) service with a persistent job queue and a live
+Turns recipe posts from TikTok, Instagram, YouTube, and similar sites (or any recipe
+website Mealie can scrape) into clean, structured Mealie recipes. It's a Rust (axum + SQLite) service with a persistent job queue and a live
 web UI. The UI is plain HTML, CSS, and JS embedded in the binary.
 
 ## Pipeline
 
-Each job runs through these stages. The queue records how long each stage took.
+Each job has a source. By default it is picked from the link: posts from social
+sites (TikTok, Instagram, YouTube, Facebook, Pinterest, X, Reddit, …) take the
+**social** path, and every other link takes the **web** path. The web UI and the
+`source` field of `POST /api/jobs` (`auto`, `social`, or `web`) can override that.
+
+**Web** jobs go straight to Import, where Mealie's own scraper
+(`/api/recipes/create/url`) imports the page. If Mealie can't scrape it, the job
+falls back to the social path.
+
+**Social** jobs run through these stages. The queue records how long each stage took.
 
 | Stage      | What happens                                                                 |
 | ---------- | ---------------------------------------------------------------------------- |
@@ -16,9 +25,28 @@ Each job runs through these stages. The queue records how long each stage took.
 | Extract    | `/chat/completions` with a strict JSON schema returns the recipe, or reports that the post has none. |
 | Import     | The recipe is sent to Mealie's `/api/recipes/create/html-or-json` as schema.org JSON-LD. |
 
+After either path, a **Clean** stage tidies the recipe in Mealie:
+
+- Every ingredient becomes a structured line with a quantity, a unit, a food, and a
+  note. Foods are linked to the cleanest existing Mealie food. An exact name match
+  wins. Otherwise the model chooses among search results, and a new food is created
+  only when nothing fits. Units come from Mealie's list, and duplicates named after
+  another unit's abbreviation (such as a `tbsp` unit next to `tablespoon`) are
+  never used.
+- Steps are made imperative, one action each, and linked to their ingredients.
+  Creator chatter is removed.
+- The name, description, yield, servings, and times are tidied.
+- Hashtag tags are removed and unused hashtag tags are deleted. Last of all, the
+  recipe gets the `Imported Clean` tag.
+
+Anything the model thinks needs a human look shows up as a warning in the job log.
+If the cleanup fails, the recipe stays in Mealie without the tag. Retrying the job
+then re-runs only the cleanup, not the import. Retrying a job that already
+succeeded cleans its recipe again.
+
 Posts without audio skip Download and Transcribe. A retry reuses the transcript and
 recipe saved by earlier attempts, so a failed import doesn't pay for OpenAI calls
-again. "Retry from scratch" discards that saved work. If the service stops while a
+again. "Retry from scratch" discards that saved work, including the link to the Mealie recipe. If the service stops while a
 job is running, the job goes back into the queue on the next start.
 
 ## Configuration
@@ -32,7 +60,10 @@ Settings come from environment variables:
 | `MEALIE_GROUP_NAME` | `home` |
 | `OPENAI_URL` | `https://api.openai.com/v1` |
 | `TRANSCRIPTION_MODEL` / `TEXT_MODEL` | `whisper-1` / `gpt-5-mini` |
-| `EXTRA_PROMPT` | extra instructions for every extraction |
+| `EXTRA_PROMPT` | extra instructions for every extraction and cleanup |
+| `CLEANUP` | `true` (set `false` to skip the Clean stage) |
+| `CLEAN_MODEL` | `TEXT_MODEL` |
+| `CLEAN_TAG` | `Imported Clean` |
 | `LISTEN_ADDR` | `127.0.0.1:3000` |
 | `DATABASE_PATH` | `mealie-forager.db` |
 | `WORK_DIR` | system temp dir |

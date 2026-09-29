@@ -1,5 +1,7 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -7,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::{
+    clean,
     db::{self, Job, Stage, Status},
     mealie::{self, Mealie},
     media::{self, Media, MediaInfo},
@@ -110,7 +113,7 @@ async fn process(state: &AppState, job: Job) {
     let result = match outcome {
         Some(Ok(slug)) => {
             let _ = db::finish_stage(db, id, "ok").await;
-            ctx.info(format!("Imported into Mealie in {elapsed}")).await;
+            ctx.info(format!("Finished in {elapsed}")).await;
             db::finish(db, id, Status::Succeeded, Stage::Done, None, Some(&slug)).await
         }
         Some(Err(e)) => {
@@ -142,10 +145,137 @@ async fn process(state: &AppState, job: Job) {
 
 async fn pipeline(ctx: &Ctx<'_>) -> Result<String> {
     let state = ctx.state;
-    let config = &state.config;
     let job = db::get_full(&state.db, ctx.id)
         .await?
         .ok_or_else(|| anyhow!("job disappeared"))?;
+    let mealie = Mealie {
+        http: &state.http,
+        config: &state.config,
+    };
+
+    // An earlier attempt already created the recipe; only the cleanup is left.
+    let existing = match &job.mealie_slug {
+        Some(slug) if mealie.recipe(slug).await?.is_some() => {
+            ctx.info(format!(
+                "Recipe {slug} is already in Mealie; skipping the import"
+            ))
+            .await;
+            Some(slug.clone())
+        }
+        Some(slug) => {
+            ctx.warn(format!(
+                "Recipe {slug} is no longer in Mealie; importing again"
+            ))
+            .await;
+            None
+        }
+        None => None,
+    };
+    let slug = match existing {
+        Some(slug) => slug,
+        None => import(ctx, &job, &mealie).await?,
+    };
+    if !state.config.cleanup {
+        return Ok(slug);
+    }
+    clean_recipe(ctx, &mealie, &slug, job.note.as_deref()).await
+}
+
+async fn import(ctx: &Ctx<'_>, job: &Job, mealie: &Mealie<'_>) -> Result<String> {
+    // Web jobs fall back to the post pipeline when Mealie can't scrape them; the
+    // metadata that fallback saves (a non-"web" media kind) keeps retries there.
+    let web = job.source == "web" && job.media_kind.as_deref().is_none_or(|k| k == "web");
+    if !web {
+        return import_post(ctx, job, mealie, None).await;
+    }
+    ctx.enter(Stage::Import).await?;
+    ctx.info(format!("Asking Mealie to import {}", job.url))
+        .await;
+    match mealie.create_from_url(&job.url).await {
+        Ok(slug) => finish_web_import(ctx, job, mealie, &slug).await,
+        Err(e) => {
+            let message = format!("{e:#}");
+            db::finish_stage(&ctx.state.db, ctx.id, "error").await?;
+            ctx.warn(format!(
+                "Mealie could not import this page ({message}); trying it as a post"
+            ))
+            .await;
+            import_post(ctx, job, mealie, Some(&message)).await
+        }
+    }
+}
+
+/// Records what Mealie scraped and applies the job's tags; returns the slug.
+async fn finish_web_import(
+    ctx: &Ctx<'_>,
+    job: &Job,
+    mealie: &Mealie<'_>,
+    slug: &str,
+) -> Result<String> {
+    let state = ctx.state;
+    let config = &state.config;
+    db::set_slug(&state.db, job.id, slug).await?;
+    let mut recipe = mealie
+        .recipe(slug)
+        .await?
+        .ok_or_else(|| anyhow!("Mealie created {slug} but can't find it"))?;
+    let name = recipe["name"].as_str().unwrap_or(slug).to_string();
+    let host = url::Url::parse(&job.url).ok().and_then(|u| {
+        u.host_str()
+            .map(|h| h.trim_start_matches("www.").to_string())
+    });
+    let thumbnail = recipe["id"].as_str().map(|id| config.mealie_image_link(id));
+    db::set_metadata(
+        &state.db,
+        job.id,
+        &db::Metadata {
+            title: Some(&name),
+            platform: host.as_deref(),
+            uploader: None,
+            thumbnail: thumbnail.as_deref(),
+            duration_secs: None,
+            description: recipe["description"].as_str(),
+            media_kind: "web",
+            images: &[],
+        },
+    )
+    .await?;
+    db::set_recipe_name(&state.db, job.id, &name).await?;
+    ctx.info(format!(
+        "Mealie imported \"{name}\": {} ingredients, {} steps",
+        recipe["recipeIngredient"].as_array().map_or(0, Vec::len),
+        recipe["recipeInstructions"].as_array().map_or(0, Vec::len),
+    ))
+    .await;
+
+    if !job.tags.0.is_empty() {
+        let mut tags = Vec::new();
+        for name in &job.tags.0 {
+            tags.push(mealie.ensure_tag(name).await?);
+        }
+        mealie::merge_tags(&mut recipe, &tags, false);
+        let saved = mealie.update_recipe(slug, &recipe).await?;
+        if let Some(new) = saved["slug"].as_str().filter(|s| *s != slug) {
+            db::set_slug(&state.db, job.id, new).await?;
+        }
+        ctx.info(format!("Tagged with {}", job.tags.0.join(", ")))
+            .await;
+        recipe = saved;
+    }
+    let slug = recipe["slug"].as_str().unwrap_or(slug).to_string();
+    ctx.info(format!("Created {}", config.mealie_recipe_link(&slug)))
+        .await;
+    Ok(slug)
+}
+
+async fn import_post(
+    ctx: &Ctx<'_>,
+    job: &Job,
+    mealie: &Mealie<'_>,
+    scrape_error: Option<&str>,
+) -> Result<String> {
+    let state = ctx.state;
+    let config = &state.config;
     let tags = &job.tags.0;
 
     let work = tempfile::Builder::new()
@@ -187,7 +317,13 @@ async fn pipeline(ctx: &Ctx<'_>) -> Result<String> {
                 ))
                 .await;
                 let mut info = media.gallery_dl_info(&job.url).await.map_err(|g| {
-                    anyhow!("neither yt-dlp ({e:#}) nor gallery-dl ({g:#}) could read this post")
+                    let unread = format!(
+                        "neither yt-dlp ({e:#}) nor gallery-dl ({g:#}) could read this post"
+                    );
+                    match scrape_error {
+                        Some(s) => anyhow!("Mealie could not scrape the page ({s}), and {unread}"),
+                        None => anyhow!(unread),
+                    }
                 })?;
                 info.has_audio = false;
                 info
@@ -304,7 +440,7 @@ async fn pipeline(ctx: &Ctx<'_>) -> Result<String> {
                     images: &images,
                 })
                 .await?;
-            let recipe = extracted.recipe;
+            let recipe = extracted.value;
             if recipe["is_recipe"] == false {
                 let reason = recipe["not_recipe_reason"]
                     .as_str()
@@ -335,15 +471,266 @@ async fn pipeline(ctx: &Ctx<'_>) -> Result<String> {
     ctx.enter(Stage::Import).await?;
     ctx.info("Sending recipe to Mealie").await;
     let ld = mealie::to_json_ld(&recipe, &job.url, info.thumbnail.as_deref(), tags);
-    let slug = Mealie {
-        http: &state.http,
-        config,
-    }
-    .create_from_json_ld(&ld, &job.url)
-    .await?;
+    let slug = mealie.create_from_json_ld(&ld, &job.url).await?;
+    db::set_slug(&state.db, job.id, &slug).await?;
     ctx.info(format!("Created {}", config.mealie_recipe_link(&slug)))
         .await;
     Ok(slug)
+}
+
+/// Rebuilds the imported recipe with linked foods and units, tidy steps and
+/// metadata, then tags it as cleaned.
+async fn clean_recipe(
+    ctx: &Ctx<'_>,
+    mealie: &Mealie<'_>,
+    slug: &str,
+    note: Option<&str>,
+) -> Result<String> {
+    let state = ctx.state;
+    let config = &state.config;
+    ctx.enter(Stage::Clean).await?;
+    let mut recipe = mealie
+        .recipe(slug)
+        .await?
+        .ok_or_else(|| anyhow!("recipe {slug} is no longer in Mealie"))?;
+    let lines = clean::original_lines(&recipe);
+    if lines.is_empty() {
+        bail!("the recipe has no ingredients to clean, so it was left untagged");
+    }
+    let units = clean::usable_units(mealie.units().await?);
+    ctx.info(format!(
+        "Cleaning {} ingredient lines with {}",
+        lines.len(),
+        config.clean_model
+    ))
+    .await;
+
+    let openai = OpenAi {
+        http: &state.http,
+        config,
+    };
+    let extra = [config.extra_prompt.as_deref(), note]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let completion = openai
+        .structured(
+            &config.clean_model,
+            clean::SYSTEM_PROMPT,
+            json!(clean::prompt(
+                &recipe,
+                &lines,
+                &units,
+                Some(extra.as_str()).filter(|e| !e.is_empty())
+            )),
+            "recipe_cleanup",
+            clean::plan_schema(),
+        )
+        .await?;
+    db::add_tokens(
+        &state.db,
+        ctx.id,
+        completion.prompt_tokens,
+        completion.completion_tokens,
+    )
+    .await?;
+    let plan: clean::Plan = serde_json::from_value(completion.value)
+        .context("model returned an unexpected cleanup plan")?;
+    if let Some(reason) = plan
+        .cannot_clean
+        .as_deref()
+        .filter(|r| !r.trim().is_empty())
+    {
+        bail!("the recipe is too incomplete to clean: {reason}");
+    }
+    if plan.ingredients.is_empty() {
+        bail!("the cleanup returned no ingredients");
+    }
+
+    let foods = resolve_foods(ctx, mealie, &openai, &plan).await?;
+    let plan_units = resolve_units(ctx, mealie, &plan, &units).await?;
+    let built = clean::build(&plan, &lines, &foods, &plan_units)?;
+    for warning in &built.warnings {
+        ctx.warn(warning).await;
+    }
+    for note in &plan.notes {
+        ctx.warn(format!("Needs a human look: {note}")).await;
+    }
+    clean::apply(&mut recipe, &plan, built);
+    let saved = mealie.update_recipe(slug, &recipe).await?;
+    let slug = saved["slug"].as_str().unwrap_or(slug).to_string();
+    db::set_slug(&state.db, ctx.id, &slug).await?;
+
+    let mut saved = mealie
+        .recipe(&slug)
+        .await?
+        .ok_or_else(|| anyhow!("recipe {slug} disappeared after the cleanup"))?;
+    let mut known_units = units;
+    known_units.extend(plan_units.into_values());
+    let problems = clean::verify(&saved, &known_units);
+    if !problems.is_empty() {
+        bail!(
+            "the cleanup didn't stick, so the recipe was left untagged: {}",
+            problems.join("; ")
+        );
+    }
+
+    let tag = mealie.ensure_tag(&config.clean_tag).await?;
+    mealie::merge_tags(&mut saved, &[tag], true);
+    let saved = mealie.update_recipe(&slug, &saved).await?;
+    let slug = saved["slug"].as_str().unwrap_or(&slug).to_string();
+    match mealie.delete_empty_hashtags().await {
+        Ok(deleted) if !deleted.is_empty() => {
+            ctx.info(format!("Deleted unused tags {}", deleted.join(", ")))
+                .await;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            ctx.warn(format!("Could not tidy unused hashtag tags: {e:#}"))
+                .await
+        }
+    }
+    let name = saved["name"].as_str().unwrap_or(&slug);
+    db::set_recipe_name(&state.db, ctx.id, name).await?;
+    ctx.info(format!(
+        "Cleaned \"{name}\": {} ingredients, {} steps, tagged {}",
+        saved["recipeIngredient"].as_array().map_or(0, Vec::len),
+        saved["recipeInstructions"].as_array().map_or(0, Vec::len),
+        config.clean_tag
+    ))
+    .await;
+    Ok(slug)
+}
+
+/// Links every planned food to a Mealie food: exact name matches first, then the
+/// model picks among search results, and only then are new foods created.
+async fn resolve_foods(
+    ctx: &Ctx<'_>,
+    mealie: &Mealie<'_>,
+    openai: &OpenAi<'_>,
+    plan: &clean::Plan,
+) -> Result<HashMap<String, Value>> {
+    let mut resolved = HashMap::new();
+    let mut plurals = HashMap::new();
+    let mut pending: Vec<(String, Vec<Value>)> = Vec::new();
+    for ing in &plan.ingredients {
+        let food = clean::key(&ing.food);
+        if food.is_empty() {
+            bail!("the cleanup left an ingredient without a food");
+        }
+        if resolved.contains_key(&food) || plurals.contains_key(&food) {
+            continue;
+        }
+        plurals.insert(food.clone(), clean::key(&ing.food_plural));
+        let mut candidates: Vec<Value> = Vec::new();
+        for term in clean::search_terms(&food) {
+            for found in mealie.search_foods(&term).await? {
+                if !candidates.iter().any(|c| c["id"] == found["id"]) {
+                    candidates.push(found);
+                }
+            }
+            if clean::exact_food(&candidates, &food, &ing.food_plural).is_some() {
+                break;
+            }
+        }
+        match clean::exact_food(&candidates, &food, &ing.food_plural) {
+            Some(found) => {
+                resolved.insert(food, found.clone());
+            }
+            None => pending.push((food, candidates)),
+        }
+    }
+
+    let (ask, mut create): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(_, c)| !c.is_empty());
+    if !ask.is_empty() {
+        let completion = openai
+            .structured(
+                &ctx.state.config.clean_model,
+                clean::MATCH_PROMPT,
+                json!(clean::match_prompt(&ask)),
+                "food_match",
+                clean::match_schema(),
+            )
+            .await?;
+        db::add_tokens(
+            &ctx.state.db,
+            ctx.id,
+            completion.prompt_tokens,
+            completion.completion_tokens,
+        )
+        .await?;
+        let matches: clean::Matches = serde_json::from_value(completion.value)
+            .context("model returned unexpected food matches")?;
+        for (food, candidates) in ask {
+            let chosen = matches
+                .matches
+                .iter()
+                .find(|m| clean::key(&m.food) == food)
+                .and_then(|m| m.id.as_deref())
+                .and_then(|id| candidates.iter().find(|c| c["id"].as_str() == Some(id)));
+            match chosen {
+                Some(found) => {
+                    resolved.insert(food, found.clone());
+                }
+                None => create.push((food, candidates)),
+            }
+        }
+    }
+    for (food, _) in create {
+        let plural = plurals
+            .get(&food)
+            .filter(|p| !p.is_empty())
+            .cloned()
+            .unwrap_or_else(|| food.clone());
+        let created = mealie.create_food(&food, &plural).await?;
+        ctx.info(format!("Created food \"{food}\"")).await;
+        resolved.insert(food, created);
+    }
+    Ok(resolved)
+}
+
+/// Maps every planned unit to an existing Mealie unit, creating the genuinely
+/// new ones the plan declared.
+async fn resolve_units(
+    ctx: &Ctx<'_>,
+    mealie: &Mealie<'_>,
+    plan: &clean::Plan,
+    units: &[Value],
+) -> Result<HashMap<String, Value>> {
+    let mut resolved = HashMap::new();
+    let mut created: Vec<Value> = Vec::new();
+    for name in plan.ingredients.iter().filter_map(|i| i.unit.as_deref()) {
+        let unit = clean::key(name);
+        if unit.is_empty() || resolved.contains_key(&unit) {
+            continue;
+        }
+        if let Some(found) =
+            clean::find_unit(units, &unit).or_else(|| clean::find_unit(&created, &unit))
+        {
+            resolved.insert(unit, found.clone());
+            continue;
+        }
+        let Some(new) = plan
+            .new_units
+            .iter()
+            .find(|u| clean::key(&u.name) == unit || clean::key(&u.plural_name) == unit)
+        else {
+            continue;
+        };
+        let made = mealie
+            .create_unit(
+                &clean::key(&new.name),
+                &clean::key(&new.plural_name),
+                new.abbreviation.trim(),
+            )
+            .await?;
+        ctx.info(format!("Created unit \"{}\"", clean::key(&new.name)))
+            .await;
+        created.push(made.clone());
+        resolved.insert(unit, made);
+    }
+    Ok(resolved)
 }
 
 async fn download(

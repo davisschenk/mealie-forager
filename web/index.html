@@ -41,9 +41,9 @@
       <aside class="side">
         <form id="submit" class="card submit" autocomplete="off">
           <h2>Import a recipe</h2>
-          <p class="muted">TikTok, Instagram, YouTube, Facebook, Pinterest — anything yt-dlp can read.</p>
+          <p class="muted">A TikTok, Instagram, YouTube or Pinterest post, or any recipe website Mealie can import.</p>
           <div class="url-field">
-            <input id="url" name="url" type="text" inputmode="url" placeholder="Paste a link to a post…" required />
+            <input id="url" name="url" type="text" inputmode="url" placeholder="Paste a link to a post or recipe…" required />
             <button type="button" id="paste" class="icon-btn" title="Paste from clipboard">
               <svg class="icon"><use href="#i-paste" /></svg>
             </button>
@@ -51,6 +51,14 @@
           <div class="chips" id="chips">
             <input id="tag-input" type="text" placeholder="Add tags (Enter)" />
           </div>
+          <label class="source-field">
+            <span class="muted small">Import as</span>
+            <select id="source">
+              <option value="auto" selected>Detect automatically</option>
+              <option value="social">Social post (transcribe + AI)</option>
+              <option value="web">Recipe website (Mealie scraper)</option>
+            </select>
+          </label>
           <details class="note">
             <summary>Notes for the AI</summary>
             <textarea id="note" rows="3" placeholder="e.g. convert to metric, make it vegetarian, serves 2"></textarea>

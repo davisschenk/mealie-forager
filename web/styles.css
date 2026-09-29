@@ -288,6 +288,7 @@ h2 {
 }
 
 input,
+select,
 textarea {
   font: inherit;
   color: var(--text);
@@ -314,8 +315,25 @@ textarea {
   transition: border-color 0.15s;
 }
 
+.source-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.source-field select {
+  flex: 1;
+  min-width: 0;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 8px 10px;
+}
+
 .url-field:focus-within,
 .chips:focus-within,
+.source-field select:focus,
 textarea:focus {
   border-color: var(--accent);
 }

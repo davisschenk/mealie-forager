@@ -68,6 +68,8 @@ async fn config(State(state): State<AppState>) -> Json<serde_json::Value> {
         "transcription_model": c.transcription_model,
         "workers": c.workers,
         "max_duration_secs": c.max_duration_secs,
+        "cleanup": c.cleanup,
+        "clean_tag": c.clean_tag,
     }))
 }
 
@@ -97,6 +99,8 @@ struct CreateJob {
     #[serde(default)]
     tags: Vec<String>,
     note: Option<String>,
+    /// "auto" (default), "social" (yt-dlp and the model) or "web" (Mealie's scraper).
+    source: Option<String>,
     #[serde(default)]
     force: bool,
 }
@@ -107,6 +111,17 @@ async fn create(
 ) -> ApiResult<(StatusCode, Json<db::Job>)> {
     let url = urls::extract(&req.url)
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "that doesn't look like a link"))?;
+    let source = match req.source.as_deref().unwrap_or("auto") {
+        "auto" if urls::is_social(&url) => "social",
+        "auto" => "web",
+        s @ ("social" | "web") => s,
+        _ => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "source must be auto, social or web",
+            ))
+        }
+    };
     if !req.force {
         if let Some(existing) = db::find_imported(&state.db, &url).await? {
             return Err(ApiError(
@@ -122,7 +137,7 @@ async fn create(
         .filter(|t| !t.is_empty())
         .collect();
     let note = req.note.as_deref().map(str::trim).filter(|n| !n.is_empty());
-    let id = db::insert_job(&state.db, &url, &tags, note).await?;
+    let id = db::insert_job(&state.db, &url, source, &tags, note).await?;
     state.wake.notify_waiters();
     state.publish_job(id).await;
     let job = db::get_summary(&state.db, id)
