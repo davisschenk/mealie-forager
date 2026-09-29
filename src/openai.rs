@@ -81,8 +81,8 @@ pub struct ExtractInput<'a> {
     pub images: &'a [String],
 }
 
-pub struct Extracted {
-    pub recipe: Value,
+pub struct Completion {
+    pub value: Value,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
 }
@@ -180,7 +180,7 @@ impl OpenAi<'_> {
         Ok(body["text"].as_str().unwrap_or_default().trim().to_string())
     }
 
-    pub async fn extract_recipe(&self, input: &ExtractInput<'_>) -> Result<Extracted> {
+    pub async fn extract_recipe(&self, input: &ExtractInput<'_>) -> Result<Completion> {
         let mut content = vec![json!({
             "type": "text",
             "text": user_prompt(input, self.config.extra_prompt.as_deref()),
@@ -191,15 +191,34 @@ impl OpenAi<'_> {
                 .iter()
                 .map(|url| json!({ "type": "image_url", "image_url": { "url": url } })),
         );
+        self.structured(
+            &self.config.text_model,
+            SYSTEM_PROMPT,
+            json!(content),
+            "recipe",
+            recipe_schema(),
+        )
+        .await
+    }
+
+    /// Runs a chat completion whose reply must match `schema` (strict JSON schema mode).
+    pub async fn structured(
+        &self,
+        model: &str,
+        system: &str,
+        user: Value,
+        name: &str,
+        schema: Value,
+    ) -> Result<Completion> {
         let body = json!({
-            "model": self.config.text_model,
+            "model": model,
             "messages": [
-                { "role": "system", "content": SYSTEM_PROMPT },
-                { "role": "user", "content": content },
+                { "role": "system", "content": system },
+                { "role": "user", "content": user },
             ],
             "response_format": {
                 "type": "json_schema",
-                "json_schema": { "name": "recipe", "strict": true, "schema": recipe_schema() }
+                "json_schema": { "name": name, "strict": true, "schema": schema }
             }
         });
         let resp = self
@@ -210,7 +229,7 @@ impl OpenAi<'_> {
             .timeout(Duration::from_secs(300))
             .send()
             .await
-            .context("recipe extraction request failed")?;
+            .with_context(|| format!("{name} request failed"))?;
         if !resp.status().is_success() {
             bail!("chat API returned {}", error_body(resp).await);
         }
@@ -230,12 +249,48 @@ impl OpenAi<'_> {
             .message
             .content
             .context("model returned empty content")?;
-        let recipe = serde_json::from_str(&text).context("model returned invalid JSON")?;
-        Ok(Extracted {
-            recipe,
+        let value = serde_json::from_str(&text).context("model returned invalid JSON")?;
+        Ok(Completion {
+            value,
             prompt_tokens: chat.usage.as_ref().and_then(|u| u.prompt_tokens),
             completion_tokens: chat.usage.as_ref().and_then(|u| u.completion_tokens),
         })
+    }
+}
+
+/// Strict mode needs every object to list all its properties as required and
+/// forbid extras; this checks a schema recursively (used by tests).
+#[cfg(test)]
+pub fn assert_strict(schema: &Value, path: &str) {
+    if let Some(props) = schema["properties"].as_object() {
+        assert_eq!(
+            schema["additionalProperties"], false,
+            "{path} allows extra properties"
+        );
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path} has no required list"))
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for (key, prop) in props {
+            assert!(
+                required.contains(&key.as_str()),
+                "{path}.{key} missing from required"
+            );
+            assert_strict(prop, &format!("{path}.{key}"));
+        }
+    }
+    assert_strict_children(schema, path);
+}
+
+#[cfg(test)]
+fn assert_strict_children(schema: &Value, path: &str) {
+    if schema.get("items").is_some() {
+        assert_strict(&schema["items"], &format!("{path}[]"));
+    }
+    for variant in schema["anyOf"].as_array().into_iter().flatten() {
+        assert_strict(variant, path);
     }
 }
 
@@ -245,20 +300,7 @@ mod tests {
 
     #[test]
     fn schema_requires_every_property() {
-        let schema = recipe_schema();
-        let props = schema["properties"].as_object().unwrap();
-        let required: Vec<&str> = schema["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        for key in props.keys() {
-            assert!(
-                required.contains(&key.as_str()),
-                "{key} missing from required"
-            );
-        }
+        assert_strict(&recipe_schema(), "recipe");
     }
 
     #[test]

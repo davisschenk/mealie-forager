@@ -64,6 +64,7 @@ pub enum Stage {
     Transcribe,
     Extract,
     Import,
+    Clean,
     Done,
 }
 
@@ -76,6 +77,7 @@ impl Stage {
             Stage::Transcribe => "transcribe",
             Stage::Extract => "extract",
             Stage::Import => "import",
+            Stage::Clean => "clean",
             Stage::Done => "done",
         }
     }
@@ -85,6 +87,7 @@ impl Stage {
 pub struct Job {
     pub id: i64,
     pub url: String,
+    pub source: String,
     pub tags: Json<Vec<String>>,
     pub note: Option<String>,
     pub status: String,
@@ -122,7 +125,8 @@ pub struct Job {
     pub recipe_json: Option<Json<serde_json::Value>>,
 }
 
-const SUMMARY_COLUMNS: &str = "id, url, tags, note, status, stage, progress, attempts, error, \
+const SUMMARY_COLUMNS: &str =
+    "id, url, source, tags, note, status, stage, progress, attempts, error, \
     error_stage, title, platform, uploader, thumbnail, duration_secs, media_kind, recipe_name, \
     mealie_slug, prompt_tokens, completion_tokens, created_at, started_at, finished_at, updated_at";
 
@@ -148,15 +152,17 @@ pub struct Event {
 pub async fn insert_job(
     db: &SqlitePool,
     url: &str,
+    source: &str,
     tags: &[String],
     note: Option<&str>,
 ) -> Result<i64> {
     let now = now_ms();
     let id = sqlx::query_scalar(
-        "INSERT INTO jobs (url, tags, note, status, stage, created_at, updated_at) \
-         VALUES (?, ?, ?, 'queued', 'queued', ?, ?) RETURNING id",
+        "INSERT INTO jobs (url, source, tags, note, status, stage, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, 'queued', 'queued', ?, ?) RETURNING id",
     )
     .bind(url)
+    .bind(source)
     .bind(Json(tags))
     .bind(note)
     .bind(now)
@@ -372,6 +378,46 @@ pub async fn set_recipe(
     Ok(())
 }
 
+pub async fn set_slug(db: &SqlitePool, id: i64, slug: &str) -> Result<()> {
+    sqlx::query("UPDATE jobs SET mealie_slug = ?, updated_at = ? WHERE id = ?")
+        .bind(slug)
+        .bind(now_ms())
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_recipe_name(db: &SqlitePool, id: i64, name: &str) -> Result<()> {
+    sqlx::query("UPDATE jobs SET recipe_name = ?, updated_at = ? WHERE id = ?")
+        .bind(name)
+        .bind(now_ms())
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn add_tokens(
+    db: &SqlitePool,
+    id: i64,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE jobs SET prompt_tokens = COALESCE(prompt_tokens, 0) + COALESCE(?, 0), \
+         completion_tokens = COALESCE(completion_tokens, 0) + COALESCE(?, 0), \
+         updated_at = ? WHERE id = ?",
+    )
+    .bind(prompt_tokens)
+    .bind(completion_tokens)
+    .bind(now_ms())
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 pub async fn finish(
     db: &SqlitePool,
     id: i64,
@@ -417,7 +463,7 @@ pub async fn requeue(db: &SqlitePool, id: i64, fresh: bool) -> Result<bool> {
     let reset = if fresh {
         ", title = NULL, platform = NULL, uploader = NULL, thumbnail = NULL, \
          duration_secs = NULL, description = NULL, media_kind = NULL, images = NULL, \
-         transcript = NULL, recipe_json = NULL, recipe_name = NULL"
+         transcript = NULL, recipe_json = NULL, recipe_name = NULL, mealie_slug = NULL"
     } else {
         ""
     };
@@ -566,8 +612,10 @@ mod tests {
     #[tokio::test]
     async fn claims_in_order_and_only_once() {
         let db = connect_memory().await.unwrap();
-        let a = insert_job(&db, "https://a", &[], None).await.unwrap();
-        let b = insert_job(&db, "https://b", &["x".into()], None)
+        let a = insert_job(&db, "https://a", "social", &[], None)
+            .await
+            .unwrap();
+        let b = insert_job(&db, "https://b", "web", &["x".into()], None)
             .await
             .unwrap();
 
@@ -578,13 +626,16 @@ mod tests {
         let second = claim_next(&db).await.unwrap().unwrap();
         assert_eq!(second.id, b);
         assert_eq!(second.tags.0, vec!["x".to_string()]);
+        assert_eq!(second.source, "web");
         assert!(claim_next(&db).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn interrupted_jobs_are_requeued() {
         let db = connect_memory().await.unwrap();
-        let id = insert_job(&db, "https://a", &[], None).await.unwrap();
+        let id = insert_job(&db, "https://a", "social", &[], None)
+            .await
+            .unwrap();
         claim_next(&db).await.unwrap();
         start_stage(&db, id, 1, Stage::Download).await.unwrap();
 
@@ -597,7 +648,9 @@ mod tests {
     #[tokio::test]
     async fn retry_keeps_cached_work_unless_fresh() {
         let db = connect_memory().await.unwrap();
-        let id = insert_job(&db, "https://a", &[], None).await.unwrap();
+        let id = insert_job(&db, "https://a", "social", &[], None)
+            .await
+            .unwrap();
         claim_next(&db).await.unwrap();
         set_transcript(&db, id, "hello").await.unwrap();
         finish(
@@ -643,7 +696,9 @@ mod tests {
     #[tokio::test]
     async fn stats_and_summaries_load() {
         let db = connect_memory().await.unwrap();
-        let id = insert_job(&db, "https://a", &[], None).await.unwrap();
+        let id = insert_job(&db, "https://a", "social", &[], None)
+            .await
+            .unwrap();
         claim_next(&db).await.unwrap();
         start_stage(&db, id, 1, Stage::Metadata).await.unwrap();
         finish_stage(&db, id, "ok").await.unwrap();

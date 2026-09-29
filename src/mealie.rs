@@ -73,33 +73,214 @@ pub struct Mealie<'a> {
 }
 
 impl Mealie<'_> {
-    pub async fn create_from_json_ld(&self, ld: &Value, url: &str) -> Result<String> {
-        let resp = self
-            .http
-            .post(format!(
-                "{}/api/recipes/create/html-or-json",
-                self.config.mealie_url
-            ))
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.config.mealie_url)
+    }
+
+    async fn send(&self, req: reqwest::RequestBuilder) -> Result<Option<Value>> {
+        let resp = req
             .bearer_auth(&self.config.mealie_api_key)
-            .json(&json!({ "data": ld.to_string(), "url": url, "includeTags": true }))
-            .timeout(Duration::from_secs(180))
             .send()
             .await
             .context("could not reach Mealie")?;
         let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            let detail = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|v| v["detail"]["message"].as_str().map(str::to_string))
+            let parsed = serde_json::from_str::<Value>(&body).ok();
+            let detail = parsed
+                .as_ref()
+                .and_then(|v| {
+                    v["detail"]["message"]
+                        .as_str()
+                        .or_else(|| v["detail"].as_str())
+                        .map(str::to_string)
+                })
+                .or_else(|| parsed.map(|v| v["detail"].to_string()))
                 .unwrap_or(body);
             bail!(
                 "Mealie returned {status}: {}",
                 detail.chars().take(400).collect::<String>()
             );
         }
-        serde_json::from_str::<String>(&body).context("Mealie did not return a recipe slug")
+        if body.trim().is_empty() {
+            return Ok(Some(Value::Null));
+        }
+        Ok(Some(
+            serde_json::from_str(&body).context("Mealie returned invalid JSON")?,
+        ))
     }
+
+    async fn call(&self, req: reqwest::RequestBuilder, what: &str) -> Result<Value> {
+        self.send(req)
+            .await?
+            .with_context(|| format!("Mealie returned 404 for {what}"))
+    }
+
+    async fn slug(&self, req: reqwest::RequestBuilder) -> Result<String> {
+        let value = self.call(req, "recipe creation").await?;
+        value
+            .as_str()
+            .map(str::to_string)
+            .context("Mealie did not return a recipe slug")
+    }
+
+    pub async fn create_from_json_ld(&self, ld: &Value, url: &str) -> Result<String> {
+        self.slug(
+            self.http
+                .post(self.url("/api/recipes/create/html-or-json"))
+                .json(&json!({ "data": ld.to_string(), "url": url, "includeTags": true }))
+                .timeout(Duration::from_secs(180)),
+        )
+        .await
+    }
+
+    /// Lets Mealie's own scraper import a recipe web page.
+    pub async fn create_from_url(&self, url: &str) -> Result<String> {
+        self.slug(
+            self.http
+                .post(self.url("/api/recipes/create/url"))
+                .json(&json!({ "url": url, "includeTags": true }))
+                .timeout(Duration::from_secs(180)),
+        )
+        .await
+    }
+
+    pub async fn recipe(&self, slug: &str) -> Result<Option<Value>> {
+        self.send(self.http.get(self.url(&format!("/api/recipes/{slug}"))))
+            .await
+    }
+
+    /// Replaces the whole recipe; returns it as saved (the slug follows the name).
+    pub async fn update_recipe(&self, slug: &str, recipe: &Value) -> Result<Value> {
+        self.call(
+            self.http
+                .put(self.url(&format!("/api/recipes/{slug}")))
+                .json(recipe),
+            "recipe update",
+        )
+        .await
+    }
+
+    async fn items(&self, path: &str, query: &[(&str, &str)]) -> Result<Vec<Value>> {
+        let page = self
+            .call(self.http.get(self.url(path)).query(query), path)
+            .await?;
+        Ok(page["items"].as_array().cloned().unwrap_or_default())
+    }
+
+    pub async fn units(&self) -> Result<Vec<Value>> {
+        self.items("/api/units", &[("perPage", "-1")]).await
+    }
+
+    pub async fn search_foods(&self, search: &str) -> Result<Vec<Value>> {
+        self.items("/api/foods", &[("search", search), ("perPage", "15")])
+            .await
+    }
+
+    pub async fn create_food(&self, name: &str, plural_name: &str) -> Result<Value> {
+        self.call(
+            self.http
+                .post(self.url("/api/foods"))
+                .json(&json!({ "name": name, "pluralName": plural_name, "description": "" })),
+            "food creation",
+        )
+        .await
+    }
+
+    pub async fn create_unit(
+        &self,
+        name: &str,
+        plural_name: &str,
+        abbreviation: &str,
+    ) -> Result<Value> {
+        self.call(
+            self.http.post(self.url("/api/units")).json(&json!({
+                "name": name,
+                "pluralName": plural_name,
+                "abbreviation": abbreviation,
+                "description": "",
+                "fraction": true,
+                "useAbbreviation": false,
+            })),
+            "unit creation",
+        )
+        .await
+    }
+
+    /// Finds a tag by name (ignoring case), creating it when missing.
+    pub async fn ensure_tag(&self, name: &str) -> Result<Value> {
+        let tags = self
+            .items(
+                "/api/organizers/tags",
+                &[("search", name), ("perPage", "-1")],
+            )
+            .await?;
+        if let Some(tag) = tags.into_iter().find(|t| {
+            t["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        }) {
+            return Ok(tag);
+        }
+        self.call(
+            self.http
+                .post(self.url("/api/organizers/tags"))
+                .json(&json!({ "name": name })),
+            "tag creation",
+        )
+        .await
+    }
+
+    /// Deletes unused tags that came from hashtags; returns their names.
+    pub async fn delete_empty_hashtags(&self) -> Result<Vec<String>> {
+        let empty = self
+            .call(
+                self.http.get(self.url("/api/organizers/tags/empty")),
+                "empty tags",
+            )
+            .await?;
+        let mut deleted = Vec::new();
+        for tag in empty.as_array().into_iter().flatten() {
+            let (Some(id), Some(name)) = (tag["id"].as_str(), tag["name"].as_str()) else {
+                continue;
+            };
+            if name.starts_with('#') {
+                self.send(
+                    self.http
+                        .delete(self.url(&format!("/api/organizers/tags/{id}"))),
+                )
+                .await?;
+                deleted.push(name.to_string());
+            }
+        }
+        Ok(deleted)
+    }
+}
+
+/// Adds `add` (by name, ignoring case) to a recipe's tags, optionally dropping
+/// tags that came from hashtags.
+pub fn merge_tags(recipe: &mut Value, add: &[Value], drop_hashtags: bool) {
+    let mut tags: Vec<Value> = recipe["tags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| !drop_hashtags || !t["name"].as_str().unwrap_or_default().starts_with('#'))
+        .cloned()
+        .collect();
+    for tag in add {
+        let name = tag["name"].as_str().unwrap_or_default();
+        if !tags.iter().any(|t| {
+            t["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        }) {
+            tags.push(tag.clone());
+        }
+    }
+    recipe["tags"] = Value::Array(tags);
 }
 
 #[cfg(test)]
@@ -136,5 +317,28 @@ mod tests {
             ld["nutrition"],
             json!({"@type": "NutritionInformation", "calories": "450 kcal"})
         );
+    }
+
+    #[test]
+    fn merge_tags_drops_hashtags_and_dedupes() {
+        let mut recipe = json!({ "tags": [
+            { "id": "1", "name": "#foodtok" },
+            { "id": "2", "name": "Imported" },
+        ]});
+        merge_tags(
+            &mut recipe,
+            &[
+                json!({ "id": "2", "name": "imported" }),
+                json!({ "id": "3", "name": "Imported Clean" }),
+            ],
+            true,
+        );
+        let names: Vec<&str> = recipe["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["Imported", "Imported Clean"]);
     }
 }

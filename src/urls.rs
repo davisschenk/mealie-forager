@@ -20,6 +20,42 @@ const TRACKING_PARAMS: &[&str] = &[
     "utm_content",
 ];
 
+/// Hosts whose posts go through yt-dlp and the model instead of Mealie's scraper.
+const SOCIAL_HOSTS: &[&str] = &[
+    "tiktok.com",
+    "instagram.com",
+    "youtube.com",
+    "youtu.be",
+    "facebook.com",
+    "fb.watch",
+    "pinterest.com",
+    "pin.it",
+    "x.com",
+    "twitter.com",
+    "threads.net",
+    "threads.com",
+    "reddit.com",
+    "redd.it",
+    "vimeo.com",
+    "snapchat.com",
+];
+
+/// Whether the URL is a social-media post rather than a recipe web page.
+pub fn is_social(raw: &str) -> bool {
+    let Some(host) = Url::parse(raw)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+    else {
+        return false;
+    };
+    SOCIAL_HOSTS.iter().any(|s| {
+        host == *s
+            || host.strip_suffix(s).is_some_and(|rest| rest.ends_with('.'))
+            // pinterest.co.uk, pinterest.de, …
+            || (s.starts_with("pinterest.") && host.split('.').any(|l| l == "pinterest"))
+    })
+}
+
 /// Pulls the first http(s) URL out of text shared from a mobile app.
 pub fn extract(text: &str) -> Option<String> {
     text.split_whitespace()
@@ -82,5 +118,15 @@ mod tests {
             "https://youtu.be/abc"
         );
         assert!(extract("no links here").is_none());
+    }
+
+    #[test]
+    fn classifies_social_hosts() {
+        assert!(is_social("https://www.tiktok.com/@chef/video/42"));
+        assert!(is_social("https://vm.tiktok.com/abc"));
+        assert!(is_social("https://youtu.be/abc"));
+        assert!(is_social("https://www.pinterest.co.uk/pin/1"));
+        assert!(!is_social("https://www.seriouseats.com/garlic-noodles"));
+        assert!(!is_social("https://notyoutube.com/x"));
     }
 }

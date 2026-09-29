@@ -15,6 +15,10 @@ pub struct Config {
     pub text_model: String,
     pub extra_prompt: Option<String>,
 
+    pub cleanup: bool,
+    pub clean_model: String,
+    pub clean_tag: String,
+
     pub mealie_url: String,
     pub mealie_public_url: String,
     pub mealie_api_key: String,
@@ -67,6 +71,17 @@ impl Config {
             text_model: var("TEXT_MODEL").unwrap_or_else(|| "gpt-5-mini".into()),
             extra_prompt: var("EXTRA_PROMPT"),
 
+            cleanup: var("CLEANUP").is_none_or(|v| {
+                !matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+            }),
+            clean_model: var("CLEAN_MODEL")
+                .or_else(|| var("TEXT_MODEL"))
+                .unwrap_or_else(|| "gpt-5-mini".into()),
+            clean_tag: var("CLEAN_TAG").unwrap_or_else(|| "Imported Clean".into()),
+
             mealie_public_url: url_var("MEALIE_PUBLIC_URL").unwrap_or_else(|| mealie_url.clone()),
             mealie_url,
             mealie_api_key: required("MEALIE_API_KEY")?.replace('\n', ""),
@@ -77,6 +92,13 @@ impl Config {
             gallery_dl: var("GALLERY_DL_PATH").unwrap_or_else(|| "gallery-dl".into()),
             cookies_file: var("COOKIES_FILE").map(PathBuf::from),
         })
+    }
+
+    pub fn mealie_image_link(&self, recipe_id: &str) -> String {
+        format!(
+            "{}/api/media/recipes/{recipe_id}/images/min-original.webp",
+            self.mealie_public_url
+        )
     }
 
     pub fn mealie_recipe_link(&self, slug: &str) -> String {

@@ -11,7 +11,7 @@ let
 in
 {
   options.services.mealie-forager = {
-    enable = lib.mkEnableOption "Mealie Forager, a social media recipe importer for Mealie";
+    enable = lib.mkEnableOption "Mealie Forager, a social media and web recipe importer for Mealie";
 
     package = mkOption {
       type = types.package;
@@ -74,6 +74,18 @@ in
       description = "Model used to transcribe audio.";
     };
 
+    cleanup = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Clean imported recipes (link foods and units, tidy steps) and tag them.";
+    };
+
+    cleanTag = mkOption {
+      type = types.str;
+      default = "Imported Clean";
+      description = "Tag added to recipes once they have been cleaned.";
+    };
+
     environmentFile = mkOption {
       type = types.path;
       description = "File with OPENAI_API_KEY and MEALIE_API_KEY (and optionally COOKIES_FILE, EXTRA_PROMPT).";
@@ -106,6 +118,8 @@ in
         TRANSCRIPTION_MODEL = cfg.transcriptionModel;
         MEALIE_URL = cfg.mealieUrl;
         MEALIE_GROUP_NAME = cfg.mealieGroup;
+        CLEANUP = lib.boolToString cfg.cleanup;
+        CLEAN_TAG = cfg.cleanTag;
       }
       // lib.optionalAttrs (cfg.mealiePublicUrl != null) { MEALIE_PUBLIC_URL = cfg.mealiePublicUrl; }
       // cfg.settings;
