@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f7f3ec" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#16130f" media="(prefers-color-scheme: dark)" />
+    <title>Mealie Forager</title>
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" /></symbol>
+      <symbol id="i-retry" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4h4" /></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3" /></symbol>
+      <symbol id="i-paste" viewBox="0 0 24 24"><path d="M9 4h6v3H9zM9 5H6a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-3" /></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" /></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10" /></symbol>
+    </svg>
+
+    <header class="topbar">
+      <a class="brand" href="/">
+        <img src="/icon.svg" alt="" width="32" height="32" />
+        <span>Mealie <span class="accent">Forager</span></span>
+      </a>
+      <div class="topbar-right">
+        <span id="live" class="live" title="Live updates">
+          <span class="dot"></span><span class="live-label">Connecting</span>
+        </span>
+        <a id="mealie-link" class="btn ghost small" href="#" target="_blank" rel="noopener" hidden>
+          Mealie <svg class="icon"><use href="#i-external" /></svg>
+        </a>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="side">
+        <form id="submit" class="card submit" autocomplete="off">
+          <h2>Import a recipe</h2>
+          <p class="muted">TikTok, Instagram, YouTube, Facebook, Pinterest — anything yt-dlp can read.</p>
+          <div class="url-field">
+            <input id="url" name="url" type="text" inputmode="url" placeholder="Paste a link to a post…" required />
+            <button type="button" id="paste" class="icon-btn" title="Paste from clipboard">
+              <svg class="icon"><use href="#i-paste" /></svg>
+            </button>
+          </div>
+          <div class="chips" id="chips">
+            <input id="tag-input" type="text" placeholder="Add tags (Enter)" />
+          </div>
+          <details class="note">
+            <summary>Notes for the AI</summary>
+            <textarea id="note" rows="3" placeholder="e.g. convert to metric, make it vegetarian, serves 2"></textarea>
+          </details>
+          <button id="submit-btn" class="btn primary" type="submit">Add to queue</button>
+        </form>
+
+        <section class="card insights">
+          <h2>Insights <span class="muted small">last 7 days</span></h2>
+          <div class="tiles" id="tiles"></div>
+          <div id="stage-times"></div>
+          <div id="failures"></div>
+        </section>
+      </aside>
+
+      <section class="queue">
+        <div class="queue-head">
+          <nav class="tabs" id="tabs" role="tablist">
+            <button role="tab" data-filter="all" aria-selected="true">All</button>
+            <button role="tab" data-filter="active">Active <span class="count" id="count-active"></span></button>
+            <button role="tab" data-filter="succeeded">Imported</button>
+            <button role="tab" data-filter="failed">Failed <span class="count bad" id="count-failed"></span></button>
+          </nav>
+          <button id="clear" class="btn ghost small" hidden>Clear</button>
+        </div>
+        <ol id="jobs" class="jobs"></ol>
+        <div id="empty" class="empty" hidden>
+          <div class="empty-art">🍳</div>
+          <p>Nothing here yet.</p>
+          <p class="muted">Paste a link or share a post to this app from your phone.</p>
+        </div>
+      </section>
+    </main>
+
+    <div id="scrim" class="scrim" hidden></div>
+    <aside id="drawer" class="drawer" aria-hidden="true" tabindex="-1"></aside>
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
