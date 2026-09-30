@@ -83,8 +83,14 @@
             <dt>Header</dt>
             <dd><code>Authorization</code> = <code id="sc-auth">Bearer ••••••••</code><button type="button" class="btn ghost small" data-copy="sc-auth">Copy</button></dd>
             <dt>Body</dt>
-            <dd>Form, field <code>file</code> (type File) = <em>Shortcut Input</em> (optional text fields: <code>tags</code>, <code>note</code>)</dd>
+            <dd>Form (optional text fields: <code>tags</code>, <code>note</code>)</dd>
           </dl>
+          <p class="muted small">Shortcuts can't send a link as a file, so branch on it:</p>
+          <ol class="shortcut-steps muted small">
+            <li><strong>Get URLs from Input</strong> (Shortcut Input)</li>
+            <li><strong>If</strong> URLs has any value: Get Contents of URL with Form field <code>url</code> (Text) = <em>URLs</em></li>
+            <li><strong>Otherwise</strong>: Get Contents of URL with Form field <code>file</code> (File) = <em>Shortcut Input</em></li>
+          </ol>
           <p class="muted small">Turn on “Show in Share Sheet” and accept URLs, Text, Images, Media and Files.</p>
           <div class="shortcut-actions">
             <button type="button" class="btn ghost small" id="sc-reveal">Show token</button>
