@@ -614,15 +614,15 @@ async fn resolve_foods(
     let mut resolved = HashMap::new();
     let mut plurals = HashMap::new();
     let mut pending: Vec<(String, Vec<Value>)> = Vec::new();
-    for ing in &plan.ingredients {
-        let food = clean::key(&ing.food);
+    for (name, plural) in plan.foods() {
+        let food = clean::key(name);
         if food.is_empty() {
             bail!("the cleanup left an ingredient without a food");
         }
         if resolved.contains_key(&food) || plurals.contains_key(&food) {
             continue;
         }
-        plurals.insert(food.clone(), clean::key(&ing.food_plural));
+        plurals.insert(food.clone(), clean::key(plural));
         let mut candidates: Vec<Value> = Vec::new();
         for term in clean::search_terms(&food) {
             for found in mealie.search_foods(&term).await? {
@@ -630,11 +630,11 @@ async fn resolve_foods(
                     candidates.push(found);
                 }
             }
-            if clean::exact_food(&candidates, &food, &ing.food_plural).is_some() {
+            if clean::exact_food(&candidates, &food, plural).is_some() {
                 break;
             }
         }
-        match clean::exact_food(&candidates, &food, &ing.food_plural) {
+        match clean::exact_food(&candidates, &food, plural) {
             Some(found) => {
                 resolved.insert(food, found.clone());
             }

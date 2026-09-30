@@ -14,12 +14,13 @@ pub const SYSTEM_PROMPT: &str = "You clean up recipes imported into Mealie so th
 You receive the recipe as Mealie stored it and the list of measurement units that exist in Mealie.\n\
 \n\
 Ingredients: rebuild every ingredient line as a structured ingredient.\n\
-- food is the plain base ingredient, singular and lowercase (\"unsalted butter\", \"garlic powder\", \"slider bun\", \"cheddar cheese\"). Prep words, sizes and alternatives go in note, never in food: \"large yellow onions, diced\" -> food \"yellow onion\", note \"large, diced\". food_plural is its plural (\"yellow onions\").\n\
+- food is the plain base ingredient, singular and lowercase (\"unsalted butter\", \"garlic powder\", \"slider bun\", \"cheddar cheese\"). Prep words and sizes go in note, never in food: \"large yellow onions, diced\" -> food \"yellow onion\", note \"large, diced\". food_plural is its plural (\"yellow onions\").\n\
 - Never combine two foods in one ingredient. Split combined lines: \"Salt and pepper, to taste\" -> two ingredients (salt, black pepper), no quantity, note \"to taste\".\n\
 - unit is the full name of a unit from the supplied list (e.g. \"tablespoon\", never \"tbsp\"), or null. Countable items with no measure (\"12 slider buns\", \"2 eggs\") have a quantity and no unit.\n\
 - Only when a genuine, reusable unit is missing from the list (e.g. slice, stick), use it and add it to new_units with its plural and abbreviation. Never add spelling variants or abbreviations of existing units.\n\
 - quantity is a decimal number (1/3 -> 0.333, 1 1/2 -> 1.5) or null. For ranges use the lower number and keep the range in note (\"8-12 slices\"). For parenthetical equivalents like \"4 tablespoons (1/4 cup)\" keep one unit and drop the duplicate.\n\
-- Keep optional/alternative info in note: \"optional\", \"or 1 cup shredded\", \"plus extra for serving\". note is \"\" when there is nothing to add.\n\
+- A different food the recipe allows instead goes in substitutions, never in note or food: \"1 cup chicken broth (or vegetable broth)\" -> food \"chicken broth\" with substitution food \"vegetable broth\"; \"butter or margarine\" -> food \"butter\" with substitution food \"margarine\". Put a caveat that only applies to the substitute in its note (\"use half as much\"), otherwise null. An alternative that is not a single food (\"water and a bouillon cube\") is a substitution with food null and the text as note. Lines marked (substitutes: ...) already have substitutions in Mealie: keep them. substitutions is [] when there are none.\n\
+- Keep other optional info in note: \"optional\", \"or 1 cup shredded\" (another form of the same food), \"plus extra for serving\". note is \"\" when there is nothing to add.\n\
 - If the recipe has components (sauce, dough, topping), set title on the first ingredient of each section; otherwise title is null.\n\
 - Order ingredients in the order they are used. source_line is the number of the original line the ingredient came from (null if none).\n\
 \n\
@@ -71,7 +72,10 @@ pub fn plan_schema() -> Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["title", "quantity", "unit", "food", "food_plural", "note", "source_line"],
+                    "required": [
+                        "title", "quantity", "unit", "food", "food_plural", "note", "substitutions",
+                        "source_line"
+                    ],
                     "properties": {
                         "title": nullable("string"),
                         "quantity": nullable("number"),
@@ -79,6 +83,19 @@ pub fn plan_schema() -> Value {
                         "food": { "type": "string" },
                         "food_plural": { "type": "string" },
                         "note": { "type": "string" },
+                        "substitutions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": ["food", "food_plural", "note"],
+                                "properties": {
+                                    "food": nullable("string"),
+                                    "food_plural": nullable("string"),
+                                    "note": nullable("string")
+                                }
+                            }
+                        },
                         "source_line": nullable("integer")
                     }
                 }
@@ -160,7 +177,32 @@ pub struct PlanIngredient {
     pub food: String,
     pub food_plural: String,
     pub note: String,
+    #[serde(default)]
+    pub substitutions: Vec<PlanSubstitution>,
     pub source_line: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlanSubstitution {
+    pub food: Option<String>,
+    pub food_plural: Option<String>,
+    pub note: Option<String>,
+}
+
+impl Plan {
+    /// Every food the plan uses, ingredients and substitutes, as (name, plural).
+    pub fn foods(&self) -> Vec<(&str, &str)> {
+        let mut foods = Vec::new();
+        for ing in &self.ingredients {
+            foods.push((ing.food.as_str(), ing.food_plural.as_str()));
+            for sub in &ing.substitutions {
+                if let Some(food) = sub.food.as_deref().filter(|f| !f.trim().is_empty()) {
+                    foods.push((food, sub.food_plural.as_deref().unwrap_or_default()));
+                }
+            }
+        }
+        foods
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +249,8 @@ pub struct Line {
     pub title: Option<String>,
     pub text: String,
     pub reference_id: Option<String>,
+    /// Substitutions Mealie already stores on the line (3.28+).
+    pub substitutions: Vec<Value>,
 }
 
 pub fn original_lines(recipe: &Value) -> Vec<Line> {
@@ -222,6 +266,7 @@ pub fn original_lines(recipe: &Value) -> Vec<Line> {
                 title: text_owned(&i["title"]),
                 text: text.to_string(),
                 reference_id: text_owned(&i["referenceId"]),
+                substitutions: i["substitutions"].as_array().cloned().unwrap_or_default(),
             })
         })
         .collect()
@@ -255,7 +300,16 @@ pub fn prompt(recipe: &Value, lines: &[Line], units: &[Value], extra: Option<&st
         if let Some(title) = &line.title {
             p += &format!("[section: {title}]\n");
         }
-        p += &format!("{i}: {}\n", line.text);
+        let subs: Vec<&str> = line
+            .substitutions
+            .iter()
+            .filter_map(|s| text(&s["substituteFood"]["name"]).or_else(|| text(&s["note"])))
+            .collect();
+        if subs.is_empty() {
+            p += &format!("{i}: {}\n", line.text);
+        } else {
+            p += &format!("{i}: {} (substitutes: {})\n", line.text, subs.join("; "));
+        }
     }
     p += "</ingredients>\n<instructions>\n";
     let steps = recipe["recipeInstructions"]
@@ -304,12 +358,19 @@ pub fn usable_units(units: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
-/// Finds a unit by name, plural or abbreviation (names win over abbreviations).
+fn has_alias(v: &Value, key: &str) -> bool {
+    v["aliases"].as_array().is_some_and(|a| {
+        a.iter()
+            .any(|alias| alias["name"].as_str().is_some_and(|n| self::key(n) == key))
+    })
+}
+
+/// Finds a unit by name, plural, alias or abbreviation (names win over abbreviations).
 pub fn find_unit<'a>(units: &'a [Value], name: &str) -> Option<&'a Value> {
     let k = key(name);
     units
         .iter()
-        .find(|u| eq(&u["name"], &k) || eq(&u["pluralName"], &k))
+        .find(|u| eq(&u["name"], &k) || eq(&u["pluralName"], &k) || has_alias(u, &k))
         .or_else(|| {
             units
                 .iter()
@@ -317,14 +378,80 @@ pub fn find_unit<'a>(units: &'a [Value], name: &str) -> Option<&'a Value> {
         })
 }
 
-/// A database food whose name is exactly this ingredient (ignoring case and plural).
+/// A database food whose name or alias is exactly this ingredient (ignoring case and plural).
 pub fn exact_food<'a>(candidates: &'a [Value], name: &str, plural: &str) -> Option<&'a Value> {
     let (name, plural) = (key(name), key(plural));
     candidates.iter().find(|f| {
         eq(&f["name"], &name)
             || eq(&f["pluralName"], &name)
-            || (!plural.is_empty() && eq(&f["name"], &plural))
+            || has_alias(f, &name)
+            || (!plural.is_empty() && (eq(&f["name"], &plural) || has_alias(f, &plural)))
     })
+}
+
+fn clean_note(note: Option<&str>) -> Option<String> {
+    note.map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+}
+
+/// The recipe-level substitutions for one ingredient: the plan's, then any the
+/// original line already had. Drops substitutes equal to the food itself,
+/// duplicates, and ones the food already lists as a food-level substitution.
+fn substitutions(
+    ing: &PlanIngredient,
+    food: &Value,
+    carried: &[Value],
+    foods: &HashMap<String, Value>,
+) -> Vec<Value> {
+    let planned = ing.substitutions.iter().map(|s| {
+        let id = s
+            .food
+            .as_deref()
+            .and_then(|f| foods.get(&key(f)))
+            .and_then(|f| text(&f["id"]))
+            .map(str::to_string);
+        (id, clean_note(s.note.as_deref()))
+    });
+    let existing = carried.iter().map(|s| {
+        (
+            text_owned(&s["substituteFoodId"]),
+            clean_note(s["note"].as_str()),
+        )
+    });
+    let food_level: Vec<(Option<String>, Option<String>)> = food["substitutions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| {
+            (
+                text_owned(&s["substituteFoodId"]),
+                clean_note(s["note"].as_str()),
+            )
+        })
+        .collect();
+    let food_id = text(&food["id"]);
+
+    let mut out: Vec<(Option<String>, Option<String>)> = Vec::new();
+    for (id, note) in planned.chain(existing) {
+        let duplicate = match &id {
+            None if note.is_none() => true,
+            None => out.iter().any(|(i, n)| i.is_none() && *n == note),
+            Some(id) => {
+                Some(id.as_str()) == food_id
+                    || out.iter().any(|(i, _)| i.as_ref() == Some(id))
+                    || food_level
+                        .iter()
+                        .any(|(i, n)| i.as_ref() == Some(id) && (note.is_none() || *n == note))
+            }
+        };
+        if !duplicate {
+            out.push((id, note));
+        }
+    }
+    out.into_iter()
+        .map(|(id, note)| json!({ "substituteFoodId": id, "note": note }))
+        .collect()
 }
 
 /// Search terms for finding a food: the full name, then its head noun.
@@ -396,10 +523,16 @@ pub fn build(
             .and_then(|i| lines.get(i));
         // Keep the original reference when a line maps to one ingredient, so
         // links Mealie already has stay valid; split lines get fresh ids.
-        let reference_id = line
+        let original_ref = line
             .and_then(|l| l.reference_id.clone())
-            .filter(|r| !used_refs.contains(r))
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            .filter(|r| !used_refs.contains(r));
+        // Substitutions already on the line follow its first ingredient.
+        let carried = match (&original_ref, line) {
+            (Some(_), Some(l)) => l.substitutions.as_slice(),
+            _ => &[],
+        };
+        let substitutions = substitutions(ing, food, carried, foods);
+        let reference_id = original_ref.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         used_refs.push(reference_id.clone());
         ingredients.push(json!({
             "referenceId": reference_id,
@@ -408,6 +541,7 @@ pub fn build(
             "unit": unit,
             "food": food,
             "note": note,
+            "substitutions": substitutions,
             "originalText": line.map(|l| l.text.as_str()),
             "isFood": true,
             "disableAmount": false,
@@ -617,6 +751,93 @@ mod tests {
         assert_eq!(
             verify(&recipe, &usable_units(super::tests::units())).len(),
             2
+        );
+    }
+
+    #[test]
+    fn matches_aliases() {
+        let foods =
+            vec![json!({"id": "f1", "name": "scallion", "aliases": [{"name": "green onion"}]})];
+        assert_eq!(
+            exact_food(&foods, "green onion", "green onions").unwrap()["id"],
+            "f1"
+        );
+        let units = vec![json!({"id": "u1", "name": "teaspoon", "aliases": [{"name": "tsp."}]})];
+        assert_eq!(find_unit(&units, "tsp.").unwrap()["id"], "u1");
+    }
+
+    #[test]
+    fn builds_substitutions() {
+        let recipe = json!({
+            "recipeIngredient": [
+                {"display": "1 cup chicken broth (or veggie broth)", "referenceId": "r0"},
+                {"display": "2 tbsp butter", "referenceId": "r1", "substitutions": [
+                    {"substituteFoodId": "f-oil", "note": null, "substituteFood": {"id": "f-oil", "name": "olive oil"}},
+                    {"substituteFoodId": null, "note": "ghee works too"},
+                ]},
+            ],
+        });
+        let lines = original_lines(&recipe);
+        let prompt = prompt(&recipe, &lines, &[], None);
+        assert!(prompt.contains("1: 2 tbsp butter (substitutes: olive oil; ghee works too)"));
+
+        let plan: Plan = serde_json::from_value(json!({
+            "cannot_clean": null, "name": "x", "description": "", "recipe_yield": null, "servings": null,
+            "prep_time": null, "cook_time": null, "total_time": null,
+            "ingredients": [
+                {"title": null, "quantity": 1, "unit": null, "food": "chicken broth", "food_plural": "chicken broth",
+                 "note": "", "source_line": 0, "substitutions": [
+                    {"food": "vegetable broth", "food_plural": "vegetable broth", "note": null},
+                    {"food": "chicken broth", "food_plural": null, "note": null},
+                    {"food": null, "food_plural": null, "note": "water and a bouillon cube"},
+                 ]},
+                {"title": null, "quantity": 2, "unit": null, "food": "butter", "food_plural": "butter",
+                 "note": "", "source_line": 1, "substitutions": [
+                    {"food": "margarine", "food_plural": "margarine", "note": null},
+                    {"food": "olive oil", "food_plural": "olive oil", "note": null},
+                 ]},
+            ],
+            "new_units": [], "instructions": [], "notes": [],
+        }))
+        .unwrap();
+        let names: Vec<&str> = plan.foods().iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            [
+                "chicken broth",
+                "vegetable broth",
+                "chicken broth",
+                "butter",
+                "margarine",
+                "olive oil"
+            ]
+        );
+
+        let foods: HashMap<String, Value> = [
+            ("chicken broth", json!({"id": "f-cb", "name": "chicken broth"})),
+            ("vegetable broth", json!({"id": "f-vb", "name": "vegetable broth"})),
+            // Butter already lists margarine as a food-level substitution.
+            ("butter", json!({"id": "f-b", "name": "butter", "substitutions": [{"substituteFoodId": "f-m", "note": null}]})),
+            ("margarine", json!({"id": "f-m", "name": "margarine"})),
+            ("olive oil", json!({"id": "f-oil", "name": "olive oil"})),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let built = build(&plan, &lines, &foods, &HashMap::new()).unwrap();
+        assert_eq!(
+            built.ingredients[0]["substitutions"],
+            json!([
+                {"substituteFoodId": "f-vb", "note": null},
+                {"substituteFoodId": null, "note": "water and a bouillon cube"},
+            ])
+        );
+        assert_eq!(
+            built.ingredients[1]["substitutions"],
+            json!([
+                {"substituteFoodId": "f-oil", "note": null},
+                {"substituteFoodId": null, "note": "ghee works too"},
+            ])
         );
     }
 
