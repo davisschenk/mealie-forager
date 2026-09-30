@@ -589,6 +589,56 @@ function connect() {
   };
 }
 
+// ── iOS Shortcut ───────────────────────────────────────────────
+
+let apiToken = null;
+
+function renderShortcut(reveal = false) {
+  $("#sc-endpoint").textContent = `${location.origin}/api/jobs`;
+  $("#sc-auth").textContent = apiToken && reveal ? `Bearer ${apiToken}` : "Bearer ••••••••";
+  $("#sc-reveal").textContent = reveal ? "Hide token" : "Show token";
+  $("#sc-reveal").dataset.shown = reveal ? "1" : "";
+}
+
+async function loadToken() {
+  if (!apiToken) apiToken = (await api("/api/token")).token;
+}
+
+$("#sc-reveal").addEventListener("click", async () => {
+  try {
+    await loadToken();
+    renderShortcut(!$("#sc-reveal").dataset.shown);
+  } catch (e) {
+    toast(e.message, { kind: "bad" });
+  }
+});
+
+$("#sc-rotate").addEventListener("click", async () => {
+  if (!confirm("Regenerate the token? Shortcuts using the old one stop working.")) return;
+  try {
+    apiToken = (await api("/api/token/rotate", { method: "POST" })).token;
+    renderShortcut(true);
+    toast("New token created — update your Shortcut");
+  } catch (e) {
+    toast(e.message, { kind: "bad" });
+  }
+});
+
+$("#shortcut").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-copy]");
+  if (!b) return;
+  try {
+    if (b.dataset.copy === "sc-auth") await loadToken();
+    const text = b.dataset.copy === "sc-auth" ? `Bearer ${apiToken}` : $(`#${b.dataset.copy}`).textContent;
+    await navigator.clipboard.writeText(text);
+    toast("Copied");
+  } catch {
+    toast("Couldn't copy — select it manually.", { kind: "bad" });
+  }
+});
+
+renderShortcut();
+
 // ── Wiring ─────────────────────────────────────────────────────
 
 $("#submit").addEventListener("submit", (e) => {

@@ -32,12 +32,15 @@ async fn main() -> Result<()> {
 
     let listen = config.listen;
     let workers = config.workers;
-    let state = state::AppState::new(config, pool)?;
+    let api_token = db::api_token(&pool).await?;
+    let state = state::AppState::new(config, pool, api_token)?;
     for i in 0..workers {
         tokio::spawn(worker::run(state.clone(), i));
     }
 
-    let app = api::router().merge(web::router()).with_state(state);
+    let app = api::router(state.clone())
+        .merge(web::router())
+        .with_state(state);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     info!("listening on http://{listen}");
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

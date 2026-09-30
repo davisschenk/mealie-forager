@@ -56,6 +56,23 @@ recipe saved by earlier attempts, so a failed import doesn't pay for OpenAI call
 again. "Retry from scratch" discards that saved work, including the link to the Mealie recipe. If the service stops while a
 job is running, the job goes back into the queue on the next start.
 
+## API and iOS Shortcut
+
+`POST /api/jobs` with a JSON body queues an import. `url` is required, and `tags`,
+`note`, and `source` are optional. The response is `201` with the job, or `409` if
+the link was already imported (send `"force": true` to import it again).
+
+API clients authenticate with `Authorization: Bearer <token>`. The token is
+generated on first start and stored in the database. The web UI's "iOS Shortcut"
+panel shows it and can regenerate it. A request with a wrong token gets a `401`.
+Requests without an `Authorization` header aren't checked, so keep the UI behind a
+proxy that authenticates them. The proxy can let requests that carry a Bearer
+header through to `/api/jobs` without its login.
+
+For an iOS Shortcut that shows up in the share sheet, add **Get Contents of URL**
+with method `POST`, the `Authorization` header, and a JSON body whose `url` is the
+Shortcut Input.
+
 ## Configuration
 
 Settings come from environment variables:
@@ -99,7 +116,7 @@ Settings come from environment variables:
 
 The service runs as a `DynamicUser` and keeps its database in
 `/var/lib/private/mealie-forager`. Put the UI behind your own authentication; it has
-none of its own.
+none of its own apart from the API token described above.
 
 ## Development
 

@@ -2,7 +2,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
@@ -31,6 +31,7 @@ pub struct Inner {
     pub wake: Notify,
     pub updates: broadcast::Sender<Update>,
     pub running: Mutex<HashMap<i64, CancellationToken>>,
+    pub api_token: RwLock<String>,
 }
 
 impl std::ops::Deref for AppState {
@@ -42,7 +43,7 @@ impl std::ops::Deref for AppState {
 }
 
 impl AppState {
-    pub fn new(config: Config, db: SqlitePool) -> anyhow::Result<Self> {
+    pub fn new(config: Config, db: SqlitePool, api_token: String) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("mealie-forager/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(15))
@@ -55,6 +56,7 @@ impl AppState {
             wake: Notify::new(),
             updates: broadcast::channel(256).0,
             running: Mutex::new(HashMap::new()),
+            api_token: RwLock::new(api_token),
         })))
     }
 

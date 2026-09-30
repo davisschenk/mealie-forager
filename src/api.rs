@@ -1,6 +1,7 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{header, StatusCode},
+    middleware::{self, Next},
     response::{
         sse::{self, KeepAlive, Sse},
         IntoResponse, Response,
@@ -47,7 +48,7 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-pub fn router() -> Router<AppState> {
+pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/config", get(config))
@@ -57,6 +58,46 @@ pub fn router() -> Router<AppState> {
         .route("/api/jobs/{id}", get(detail).delete(remove))
         .route("/api/jobs/{id}/retry", post(retry))
         .route("/api/jobs/{id}/cancel", post(cancel))
+        .route("/api/token", get(token))
+        .route("/api/token/rotate", post(rotate_token))
+        .layer(middleware::from_fn_with_state(state, bearer_auth))
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Requests carrying an Authorization header must present the API token. The
+/// reverse proxy lets only those skip its login, so this is what guards them;
+/// requests without the header are the browser UI behind the proxy's login.
+async fn bearer_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    if let Some(value) = req.headers().get(header::AUTHORIZATION) {
+        let presented = value
+            .to_str()
+            .ok()
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::trim)
+            .unwrap_or_default();
+        let valid = {
+            let token = state.api_token.read().unwrap();
+            constant_time_eq(presented.as_bytes(), token.as_bytes())
+        };
+        if !valid {
+            return ApiError::new(StatusCode::UNAUTHORIZED, "invalid API token").into_response();
+        }
+    }
+    next.run(req).await
+}
+
+async fn token(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let token = state.api_token.read().unwrap().clone();
+    Json(json!({ "token": token }))
+}
+
+async fn rotate_token(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let token = db::rotate_api_token(&state.db).await?;
+    *state.api_token.write().unwrap() = token.clone();
+    Ok(Json(json!({ "token": token })))
 }
 
 async fn config(State(state): State<AppState>) -> Json<serde_json::Value> {
