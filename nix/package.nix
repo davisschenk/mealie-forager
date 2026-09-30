@@ -41,6 +41,7 @@ rustPlatform.buildRustPackage {
 
   meta = {
     description = "Queue-based importer that turns social media recipe posts into Mealie recipes";
+    license = lib.licenses.mit;
     mainProgram = "mealie-forager";
   };
 }

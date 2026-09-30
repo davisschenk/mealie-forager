@@ -10,6 +10,7 @@ pub struct Config {
     pub work_dir: PathBuf,
     pub workers: usize,
     pub max_duration_secs: f64,
+    pub auth_password: Option<String>,
 
     pub openai_url: String,
     pub openai_api_key: String,
@@ -83,6 +84,7 @@ impl Config {
             max_duration_secs: var("MAX_DURATION_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1800.0),
+            auth_password: var("AUTH_PASSWORD"),
 
             openai_url: url_var("OPENAI_URL").unwrap_or_else(|| "https://api.openai.com/v1".into()),
             openai_api_key: required("OPENAI_API_KEY")?,
@@ -157,6 +159,7 @@ mod tests {
             work_dir: ".".into(),
             workers: 1,
             max_duration_secs: 1.0,
+            auth_password: None,
             openai_url: String::new(),
             openai_api_key: String::new(),
             transcription_model: String::new(),

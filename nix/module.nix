@@ -88,7 +88,7 @@ in
 
     environmentFile = mkOption {
       type = types.path;
-      description = "File with OPENAI_API_KEY and MEALIE_API_KEY (and optionally COOKIES_FILE, EXTRA_PROMPT).";
+      description = "File with OPENAI_API_KEY and MEALIE_API_KEY (and optionally AUTH_PASSWORD, COOKIES_FILE, EXTRA_PROMPT).";
     };
 
     settings = mkOption {

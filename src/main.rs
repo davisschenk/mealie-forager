@@ -41,8 +41,12 @@ async fn main() -> Result<()> {
         tokio::spawn(worker::run(state.clone(), i));
     }
 
-    let app = api::router(state.clone())
+    let app = api::router(&state)
         .merge(web::router())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            api::auth,
+        ))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     info!("listening on http://{listen}");
