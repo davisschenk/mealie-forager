@@ -16,7 +16,9 @@ const STATUS_LABEL = {
   failed: "Failed",
   cancelled: "Cancelled",
 };
-const SOURCE_LABEL = { social: "Social post", web: "Recipe website" };
+const SOURCE_LABEL = { social: "Social post", web: "Recipe website", file: "Upload" };
+const UPLOAD_EMOJI = { images: "🖼️", text: "📝", zip: "📦", video: "🎬" };
+const UPLOAD_KIND = { images: "Photos (Mealie AI import)", text: "Text (Mealie AI import)", zip: "Mealie export", video: "Video / audio" };
 const PLATFORM_EMOJI = { TikTok: "🎵", Instagram: "📸", YouTube: "▶️", Facebook: "📘", Pinterest: "📌" };
 
 const state = {
@@ -37,7 +39,7 @@ const esc = (value) =>
 async function api(path, options = {}) {
   const res = await fetch(path, {
     ...options,
-    headers: options.body ? { "Content-Type": "application/json" } : {},
+    headers: typeof options.body === "string" ? { "Content-Type": "application/json" } : {},
   });
   if (res.status === 204 || res.status === 202) return null;
   const body = await res.json().catch(() => ({}));
@@ -83,7 +85,7 @@ const cssUrl = (u) => u.replace(/["'()\\\s]/g, (c) => `%${c.charCodeAt(0).toStri
 function thumb(j) {
   const src = /^https?:\/\//.test(j.thumbnail || "") ? j.thumbnail : null;
   const style = src ? ` style="background-image:url('${esc(cssUrl(src))}')"` : "";
-  const emoji = src ? "" : PLATFORM_EMOJI[j.platform] || "🍽️";
+  const emoji = src ? "" : (j.source === "file" && UPLOAD_EMOJI[j.media_kind]) || PLATFORM_EMOJI[j.platform] || "🍽️";
   return `<div class="thumb"${style}>${emoji}</div>`;
 }
 
@@ -93,7 +95,8 @@ function thumb(j) {
 const isWeb = (j) => j.source === "web" && (!j.media_kind || j.media_kind === "web") && !POST_STAGES.has(j.stage) && !POST_STAGES.has(j.error_stage);
 
 function stagesFor(j) {
-  return STAGES.filter(([key]) => (key !== "clean" || state.config.cleanup) && !(isWeb(j) && POST_STAGES.has(key)));
+  const upload = j.source === "file" ? (j.media_kind === "video" ? ["transcribe", "extract", "import", "clean"] : ["import", "clean"]) : null;
+  return STAGES.filter(([key]) => (key !== "clean" || state.config.cleanup) && (upload ? upload.includes(key) : !(isWeb(j) && POST_STAGES.has(key))));
 }
 
 function stepState(j, key) {
@@ -273,6 +276,7 @@ function logLine(e) {
 }
 
 function recipeView(r, j) {
+  if (!r && j.source === "file" && j.media_kind !== "video") return `<p class="muted">Mealie imported the upload itself${j.mealie_slug ? " — open it in Mealie to see the recipe" : ""}.</p>`;
   if (!r && isWeb(j)) return `<p class="muted">Mealie scraped this page directly${j.mealie_slug ? " — open it in Mealie to see the recipe" : ""}.</p>`;
   if (!r) return `<p class="muted">The recipe appears here once the extract stage finishes.</p>`;
   const facts = [
@@ -328,7 +332,7 @@ function renderDrawer() {
     ["Attempts", j.attempts],
     ["Source", SOURCE_LABEL[j.source] || j.source || "—"],
     ["Platform", j.platform || "—"],
-    ["Media", j.media_kind || "—"],
+    ["Media", (j.source === "file" && UPLOAD_KIND[j.media_kind]) || j.media_kind || "—"],
     ["Length", j.duration_secs ? duration(j.duration_secs * 1000) : "—"],
     ["Tokens", tokens ? tokens.toLocaleString() : "—"],
     ["Added", new Date(j.created_at).toLocaleString()],
@@ -352,7 +356,7 @@ function renderDrawer() {
       ${thumb(j)}
       <div>
         <h3>${esc(jobTitle(j))}</h3>
-        <a class="source" href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.url)}</a>
+        ${j.url.startsWith("upload:") ? `<span class="source">Uploaded ${esc(j.title || j.url.slice(7))}</span>` : `<a class="source" href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.url)}</a>`}
         ${j.status === "succeeded" ? "" : stepper(j)}
       </div>
       <button class="icon-btn close" data-act="close" title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
@@ -458,20 +462,37 @@ async function jobAction(id, act) {
   }
 }
 
+function uploadForm({ force }) {
+  const form = new FormData();
+  for (const f of state.files) form.append("file", f, f.name);
+  if (!state.files.length) form.append("text", $("#url").value.trim());
+  state.tags.forEach((t) => form.append("tags", t));
+  form.append("note", $("#note").value);
+  form.append("source", $("#source").value);
+  if (force) form.append("force", "true");
+  return form;
+}
+
 async function submitJob({ force = false } = {}) {
   const url = $("#url").value.trim();
-  if (!url) return;
+  if (!url && !state.files.length) return;
   const pending = $("#tag-input").value.trim();
   if (pending) addTag(pending);
   const btn = $("#submit-btn");
   btn.disabled = true;
   try {
-    const job = await api("/api/jobs", {
-      method: "POST",
-      body: JSON.stringify({ url, tags: state.tags, note: $("#note").value, source: $("#source").value, force }),
-    });
+    // Links keep the JSON endpoint; files and plain recipe text go through the upload endpoint.
+    const job =
+      !state.files.length && /https?:\/\//.test(url)
+        ? await api("/api/jobs", {
+            method: "POST",
+            body: JSON.stringify({ url, tags: state.tags, note: $("#note").value, source: $("#source").value, force }),
+          })
+        : await api("/api/jobs/upload", { method: "POST", body: uploadForm({ force }) });
     state.jobs.set(job.id, job);
     $("#url").value = "";
+    autosize();
+    setFiles([]);
     $("#note").value = "";
     state.tags = [];
     renderChips();
@@ -589,12 +610,75 @@ function connect() {
   };
 }
 
+// ── Attachments ────────────────────────────────────────────────
+
+state.files = [];
+
+function setFiles(files) {
+  state.files = files;
+  const list = $("#attached");
+  list.hidden = !files.length;
+  list.innerHTML = files
+    .map((f, i) => `<li><span>${esc(f.name)}</span><span class="muted">${f.size < 1e5 ? `${Math.max(1, Math.round(f.size / 1e3))} KB` : `${(f.size / 1e6).toFixed(1)} MB`}</span><button type="button" data-remove="${i}" aria-label="Remove ${esc(f.name)}">×</button></li>`)
+    .join("");
+}
+
+function addFiles(list) {
+  setFiles([...state.files, ...list]);
+}
+
+function autosize() {
+  const el = $("#url");
+  el.style.height = "auto";
+  el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
+}
+
+$("#attach").addEventListener("click", () => $("#files").click());
+$("#files").addEventListener("change", (e) => {
+  addFiles([...e.target.files]);
+  e.target.value = "";
+});
+$("#attached").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-remove]");
+  if (b) setFiles(state.files.filter((_, i) => i !== Number(b.dataset.remove)));
+});
+$("#url").addEventListener("input", autosize);
+$("#url").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    submitJob();
+  }
+});
+$("#url").addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) {
+    e.preventDefault();
+    addFiles(files);
+  }
+});
+for (const type of ["dragenter", "dragover"]) {
+  $("#submit").addEventListener(type, (e) => {
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    $("#submit").classList.add("dropping");
+  });
+}
+$("#submit").addEventListener("dragleave", (e) => {
+  if (!$("#submit").contains(e.relatedTarget)) $("#submit").classList.remove("dropping");
+});
+$("#submit").addEventListener("drop", (e) => {
+  $("#submit").classList.remove("dropping");
+  if (!e.dataTransfer.files.length) return;
+  e.preventDefault();
+  addFiles([...e.dataTransfer.files]);
+});
+
 // ── iOS Shortcut ───────────────────────────────────────────────
 
 let apiToken = null;
 
 function renderShortcut(reveal = false) {
-  $("#sc-endpoint").textContent = `${location.origin}/api/jobs`;
+  $("#sc-endpoint").textContent = `${location.origin}/api/jobs/upload`;
   $("#sc-auth").textContent = apiToken && reveal ? `Bearer ${apiToken}` : "Bearer ••••••••";
   $("#sc-reveal").textContent = reveal ? "Hide token" : "Show token";
   $("#sc-reveal").dataset.shown = reveal ? "1" : "";

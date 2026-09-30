@@ -15,6 +15,7 @@ use crate::{
     media::{self, Media, MediaInfo},
     openai::{ExtractInput, OpenAi},
     state::AppState,
+    uploads,
 };
 
 pub async fn run(state: AppState, index: usize) {
@@ -182,6 +183,9 @@ async fn pipeline(ctx: &Ctx<'_>) -> Result<String> {
 }
 
 async fn import(ctx: &Ctx<'_>, job: &Job, mealie: &Mealie<'_>) -> Result<String> {
+    if job.source == "file" {
+        return import_upload(ctx, job, mealie).await;
+    }
     // Web jobs fall back to the post pipeline when Mealie can't scrape them; the
     // metadata that fallback saves (a non-"web" media kind) keeps retries there.
     let web = job.source == "web" && job.media_kind.as_deref().is_none_or(|k| k == "web");
@@ -192,7 +196,13 @@ async fn import(ctx: &Ctx<'_>, job: &Job, mealie: &Mealie<'_>) -> Result<String>
     ctx.info(format!("Asking Mealie to import {}", job.url))
         .await;
     match mealie.create_from_url(&job.url).await {
-        Ok(slug) => finish_web_import(ctx, job, mealie, &slug).await,
+        Ok(slug) => {
+            let host = url::Url::parse(&job.url).ok().and_then(|u| {
+                u.host_str()
+                    .map(|h| h.trim_start_matches("www.").to_string())
+            });
+            finish_mealie_import(ctx, job, mealie, &slug, "web", host.as_deref()).await
+        }
         Err(e) => {
             let message = format!("{e:#}");
             db::finish_stage(&ctx.state.db, ctx.id, "error").await?;
@@ -205,12 +215,14 @@ async fn import(ctx: &Ctx<'_>, job: &Job, mealie: &Mealie<'_>) -> Result<String>
     }
 }
 
-/// Records what Mealie scraped and applies the job's tags; returns the slug.
-async fn finish_web_import(
+/// Records a recipe Mealie created itself and applies the job's tags; returns the slug.
+async fn finish_mealie_import(
     ctx: &Ctx<'_>,
     job: &Job,
     mealie: &Mealie<'_>,
     slug: &str,
+    media_kind: &str,
+    platform: Option<&str>,
 ) -> Result<String> {
     let state = ctx.state;
     let config = &state.config;
@@ -220,22 +232,18 @@ async fn finish_web_import(
         .await?
         .ok_or_else(|| anyhow!("Mealie created {slug} but can't find it"))?;
     let name = recipe["name"].as_str().unwrap_or(slug).to_string();
-    let host = url::Url::parse(&job.url).ok().and_then(|u| {
-        u.host_str()
-            .map(|h| h.trim_start_matches("www.").to_string())
-    });
     let thumbnail = recipe["id"].as_str().map(|id| config.mealie_image_link(id));
     db::set_metadata(
         &state.db,
         job.id,
         &db::Metadata {
             title: Some(&name),
-            platform: host.as_deref(),
+            platform,
             uploader: None,
             thumbnail: thumbnail.as_deref(),
             duration_secs: None,
             description: recipe["description"].as_str(),
-            media_kind: "web",
+            media_kind,
             images: &[],
         },
     )
@@ -263,6 +271,147 @@ async fn finish_web_import(
         recipe = saved;
     }
     let slug = recipe["slug"].as_str().unwrap_or(slug).to_string();
+    ctx.info(format!("Created {}", config.mealie_recipe_link(&slug)))
+        .await;
+    Ok(slug)
+}
+
+/// Imports uploaded files: photos and text through Mealie's AI import, a Mealie
+/// export through its zip import, and video/audio through transcription and
+/// extraction here.
+async fn import_upload(ctx: &Ctx<'_>, job: &Job, mealie: &Mealie<'_>) -> Result<String> {
+    let state = ctx.state;
+    let config = &state.config;
+    let files = uploads::load(&config.upload_dir, job.id).await?;
+    let kind = job.media_kind.clone().unwrap_or_default();
+    let names = files
+        .iter()
+        .map(|(s, _)| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match kind.as_str() {
+        "zip" => {
+            ctx.enter(Stage::Import).await?;
+            ctx.info(format!("Importing the Mealie export {names}"))
+                .await;
+            let (stored, bytes) = files.into_iter().next().context("no file uploaded")?;
+            let slug = mealie.create_from_zip(stored.name, bytes).await?;
+            finish_mealie_import(ctx, job, mealie, &slug, &kind, Some("Upload")).await
+        }
+        "video" => import_upload_media(ctx, job, mealie, files).await,
+        _ => {
+            ctx.enter(Stage::Import).await?;
+            let mut images = Vec::new();
+            let mut texts = Vec::new();
+            for (stored, bytes) in files {
+                match stored.kind {
+                    uploads::Kind::Image => {
+                        images.push((stored.name.clone(), uploads::mime(&stored), bytes));
+                    }
+                    _ => texts.push(String::from_utf8_lossy(&bytes).into_owned()),
+                }
+            }
+            ctx.info(format!(
+                "Asking Mealie's AI import to read {} image(s) and {} text file(s): {names}",
+                images.len(),
+                texts.len()
+            ))
+            .await;
+            let content = Some(texts.join("\n\n")).filter(|t| !t.trim().is_empty());
+            let slug = mealie.create_with_ai(content, images).await?;
+            finish_mealie_import(ctx, job, mealie, &slug, &kind, Some("Upload")).await
+        }
+    }
+}
+
+async fn import_upload_media(
+    ctx: &Ctx<'_>,
+    job: &Job,
+    mealie: &Mealie<'_>,
+    files: Vec<(uploads::Stored, Vec<u8>)>,
+) -> Result<String> {
+    let state = ctx.state;
+    let config = &state.config;
+    let (stored, bytes) = files.into_iter().next().context("no file uploaded")?;
+    let openai = OpenAi {
+        http: &state.http,
+        config,
+    };
+    let recipe = match job.recipe_json.clone() {
+        Some(recipe) => {
+            ctx.info("Reusing the recipe extracted in the previous attempt")
+                .await;
+            recipe.0
+        }
+        None => {
+            let transcript = match job.transcript.clone() {
+                Some(t) => t,
+                None => {
+                    ctx.enter(Stage::Transcribe).await?;
+                    let work = tempfile::Builder::new()
+                        .prefix(&format!("job-{}-", job.id))
+                        .tempdir_in(&config.work_dir)?;
+                    let source = work.path().join(format!("input-{}", stored.file));
+                    tokio::fs::write(&source, &bytes).await?;
+                    ctx.info(format!("Converting {} for transcription", stored.name))
+                        .await;
+                    let media = Media {
+                        config,
+                        cookies: None,
+                    };
+                    let audio = media.to_speech_mp3(&source, work.path()).await?;
+                    ctx.info(format!("Transcribing with {}", config.transcription_model))
+                        .await;
+                    let text = openai.transcribe(&audio).await?;
+                    ctx.info(format!(
+                        "Transcript has {} words",
+                        text.split_whitespace().count()
+                    ))
+                    .await;
+                    db::set_transcript(&state.db, job.id, &text).await?;
+                    text
+                }
+            };
+            ctx.enter(Stage::Extract).await?;
+            ctx.info(format!("Extracting recipe with {}", config.text_model))
+                .await;
+            let extracted = openai
+                .extract_recipe(&ExtractInput {
+                    url: &job.url,
+                    title: Some(&stored.name),
+                    uploader: None,
+                    description: None,
+                    transcript: Some(transcript.as_str()).filter(|t| !t.is_empty()),
+                    tags: &job.tags.0,
+                    note: job.note.as_deref(),
+                    images: &[],
+                })
+                .await?;
+            let recipe = extracted.value;
+            if recipe["is_recipe"] == false {
+                let reason = recipe["not_recipe_reason"]
+                    .as_str()
+                    .unwrap_or("no reason given");
+                bail!("no recipe found in this recording: {reason}");
+            }
+            let name = recipe["name"].as_str().unwrap_or("Untitled recipe");
+            db::set_recipe(
+                &state.db,
+                job.id,
+                &recipe,
+                name,
+                extracted.prompt_tokens,
+                extracted.completion_tokens,
+            )
+            .await?;
+            recipe
+        }
+    };
+    ctx.enter(Stage::Import).await?;
+    ctx.info("Sending recipe to Mealie").await;
+    let ld = mealie::to_json_ld(&recipe, "", None, &job.tags.0);
+    let slug = mealie.create_from_json_ld(&ld, "").await?;
+    db::set_slug(&state.db, job.id, &slug).await?;
     ctx.info(format!("Created {}", config.mealie_recipe_link(&slug)))
         .await;
     Ok(slug)

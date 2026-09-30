@@ -338,6 +338,7 @@ textarea:focus {
   border-color: var(--accent);
 }
 
+.url-field textarea,
 .url-field input {
   flex: 1;
   min-width: 0;
@@ -1215,4 +1216,59 @@ textarea:focus {
 .shortcut-actions {
   display: flex;
   gap: 8px;
+}
+
+.url-field textarea {
+  resize: none;
+  overflow-y: auto;
+  border: 0;
+  background: transparent;
+  line-height: 1.4;
+  max-height: 240px;
+}
+
+.url-field textarea:focus {
+  outline: none;
+}
+
+.attached {
+  list-style: none;
+  margin: -4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+}
+
+.attached li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.attached li span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attached button {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 1.1rem;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.submit.dropping {
+  outline: 2px dashed var(--accent);
+  outline-offset: -6px;
 }

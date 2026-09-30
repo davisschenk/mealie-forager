@@ -6,6 +6,7 @@ mod mealie;
 mod media;
 mod openai;
 mod state;
+mod uploads;
 mod urls;
 mod web;
 mod worker;
@@ -33,6 +34,8 @@ async fn main() -> Result<()> {
     let listen = config.listen;
     let workers = config.workers;
     let api_token = db::api_token(&pool).await?;
+    tokio::fs::create_dir_all(&config.upload_dir).await?;
+    uploads::prune(&pool, &config.upload_dir).await?;
     let state = state::AppState::new(config, pool, api_token)?;
     for i in 0..workers {
         tokio::spawn(worker::run(state.clone(), i));

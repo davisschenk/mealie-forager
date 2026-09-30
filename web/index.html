@@ -20,6 +20,7 @@
       <symbol id="i-paste" viewBox="0 0 24 24"><path d="M9 4h6v3H9zM9 5H6a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-3" /></symbol>
       <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" /></symbol>
       <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10" /></symbol>
+      <symbol id="i-clip" viewBox="0 0 24 24"><path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L14 7" /></symbol>
     </svg>
 
     <header class="topbar">
@@ -41,13 +42,18 @@
       <aside class="side">
         <form id="submit" class="card submit" autocomplete="off">
           <h2>Import a recipe</h2>
-          <p class="muted">A TikTok, Instagram, YouTube or Pinterest post, or any recipe website Mealie can import.</p>
+          <p class="muted">A TikTok, Instagram, YouTube or Pinterest post, a recipe website, pasted recipe text, or photos, screenshots, videos and Mealie exports.</p>
           <div class="url-field">
-            <input id="url" name="url" type="text" inputmode="url" placeholder="Paste a link to a post or recipe…" required />
+            <textarea id="url" name="url" rows="1" placeholder="Paste a link or recipe text…"></textarea>
+            <button type="button" id="attach" class="icon-btn" title="Attach photos, videos or files">
+              <svg class="icon"><use href="#i-clip" /></svg>
+            </button>
             <button type="button" id="paste" class="icon-btn" title="Paste from clipboard">
               <svg class="icon"><use href="#i-paste" /></svg>
             </button>
           </div>
+          <input id="files" type="file" multiple hidden accept="image/*,video/*,audio/*,.heic,.heif,.zip,.txt,.md,.html,.htm,.json" />
+          <ul class="attached" id="attached" hidden></ul>
           <div class="chips" id="chips">
             <input id="tag-input" type="text" placeholder="Add tags (Enter)" />
           </div>
@@ -68,7 +74,7 @@
 
         <details class="card shortcut" id="shortcut">
           <summary><h2>iOS Shortcut</h2></summary>
-          <p class="muted small">Send links from the share sheet. In Shortcuts, add <strong>Get Contents of URL</strong> with:</p>
+          <p class="muted small">Send links, photos, screenshots and videos from the share sheet. In Shortcuts, add <strong>Get Contents of URL</strong> with:</p>
           <dl class="shortcut-fields">
             <dt>URL</dt>
             <dd><code id="sc-endpoint"></code><button type="button" class="btn ghost small" data-copy="sc-endpoint">Copy</button></dd>
@@ -77,9 +83,9 @@
             <dt>Header</dt>
             <dd><code>Authorization</code> = <code id="sc-auth">Bearer ••••••••</code><button type="button" class="btn ghost small" data-copy="sc-auth">Copy</button></dd>
             <dt>Body</dt>
-            <dd>JSON, key <code>url</code> = <em>Shortcut Input</em> (optional: <code>tags</code>, <code>note</code>, <code>source</code>)</dd>
+            <dd>Form, field <code>file</code> (type File) = <em>Shortcut Input</em> (optional text fields: <code>tags</code>, <code>note</code>)</dd>
           </dl>
-          <p class="muted small">Turn on “Show in Share Sheet” and accept URLs and text.</p>
+          <p class="muted small">Turn on “Show in Share Sheet” and accept URLs, Text, Images, Media and Files.</p>
           <div class="shortcut-actions">
             <button type="button" class="btn ghost small" id="sc-reveal">Show token</button>
             <button type="button" class="btn ghost small danger" id="sc-rotate">Regenerate</button>

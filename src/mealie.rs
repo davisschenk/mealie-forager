@@ -22,7 +22,9 @@ pub fn to_json_ld(recipe: &Value, url: &str, image: Option<&str>, tags: &[String
     let mut ld = Map::new();
     ld.insert("@context".into(), json!("https://schema.org"));
     ld.insert("@type".into(), json!("Recipe"));
-    ld.insert("url".into(), json!(url));
+    if !url.is_empty() {
+        ld.insert("url".into(), json!(url));
+    }
     if let Some(image) = image {
         ld.insert("image".into(), json!(image));
     }
@@ -131,7 +133,11 @@ impl Mealie<'_> {
         self.slug(
             self.http
                 .post(self.url("/api/recipes/create/html-or-json"))
-                .json(&json!({ "data": ld.to_string(), "url": url, "includeTags": true }))
+                .json(&if url.is_empty() {
+                    json!({ "data": ld.to_string(), "includeTags": true })
+                } else {
+                    json!({ "data": ld.to_string(), "url": url, "includeTags": true })
+                })
                 .timeout(Duration::from_secs(180)),
         )
         .await
@@ -143,6 +149,51 @@ impl Mealie<'_> {
             self.http
                 .post(self.url("/api/recipes/create/url"))
                 .json(&json!({ "url": url, "includeTags": true }))
+                .timeout(Duration::from_secs(180)),
+        )
+        .await
+    }
+
+    /// Mealie's AI import (3.28+) from photos and/or text; the first image
+    /// becomes the cover.
+    pub async fn create_with_ai(
+        &self,
+        content: Option<String>,
+        images: Vec<(String, &'static str, Vec<u8>)>,
+    ) -> Result<String> {
+        let mut form = reqwest::multipart::Form::new();
+        if let Some(content) = content {
+            form = form.text("content", content);
+        }
+        for (name, mime, bytes) in images {
+            form = form.part(
+                "images",
+                reqwest::multipart::Part::bytes(bytes)
+                    .file_name(name)
+                    .mime_str(mime)?,
+            );
+        }
+        self.slug(
+            self.http
+                .post(self.url("/api/recipes/create/ai"))
+                .multipart(form)
+                .timeout(Duration::from_secs(300)),
+        )
+        .await
+        .context(
+            "Mealie's AI import failed (needs Mealie 3.28+ with OpenAI and image services enabled)",
+        )
+    }
+
+    /// Imports a recipe exported from Mealie as a .zip.
+    pub async fn create_from_zip(&self, name: String, bytes: Vec<u8>) -> Result<String> {
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(name)
+            .mime_str("application/zip")?;
+        self.slug(
+            self.http
+                .post(self.url("/api/recipes/create/zip"))
+                .multipart(reqwest::multipart::Form::new().part("archive", part))
                 .timeout(Duration::from_secs(180)),
         )
         .await

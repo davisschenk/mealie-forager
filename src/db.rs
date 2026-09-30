@@ -149,8 +149,8 @@ pub struct Event {
     pub message: String,
 }
 
-pub async fn insert_job(
-    db: &SqlitePool,
+pub async fn insert_job<'e>(
+    db: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
     url: &str,
     source: &str,
     tags: &[String],
@@ -460,9 +460,13 @@ pub async fn cancel_queued(db: &SqlitePool, id: i64) -> Result<bool> {
 }
 
 pub async fn requeue(db: &SqlitePool, id: i64, fresh: bool) -> Result<bool> {
+    // Uploads keep what describes the files themselves (set when they arrived).
     let reset = if fresh {
-        ", title = NULL, platform = NULL, uploader = NULL, thumbnail = NULL, \
-         duration_secs = NULL, description = NULL, media_kind = NULL, images = NULL, \
+        ", title = CASE WHEN source = 'file' THEN title END, \
+         platform = CASE WHEN source = 'file' THEN platform END, \
+         media_kind = CASE WHEN source = 'file' THEN media_kind END, \
+         uploader = NULL, thumbnail = NULL, \
+         duration_secs = NULL, description = NULL, images = NULL, \
          transcript = NULL, recipe_json = NULL, recipe_name = NULL, mealie_slug = NULL"
     } else {
         ""
@@ -721,6 +725,32 @@ mod tests {
             .unwrap()
             .transcript
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn fresh_retry_keeps_upload_kind() {
+        let db = connect_memory().await.unwrap();
+        let upload = insert_job(&db, "upload:memo.m4a", "file", &[], None)
+            .await
+            .unwrap();
+        let web = insert_job(&db, "https://a", "web", &[], None)
+            .await
+            .unwrap();
+        for id in [upload, web] {
+            sqlx::query(
+                "UPDATE jobs SET media_kind = 'video', title = 't', status = 'failed' WHERE id = ?",
+            )
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+            assert!(requeue(&db, id, true).await.unwrap());
+        }
+        let upload = get_full(&db, upload).await.unwrap().unwrap();
+        assert_eq!(upload.media_kind.as_deref(), Some("video"));
+        assert_eq!(upload.title.as_deref(), Some("t"));
+        let web = get_full(&db, web).await.unwrap().unwrap();
+        assert!(web.media_kind.is_none() && web.title.is_none());
     }
 
     #[tokio::test]
