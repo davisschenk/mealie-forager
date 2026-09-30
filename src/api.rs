@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{
@@ -18,7 +18,7 @@ use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use crate::{
     db,
     state::{AppState, Update},
-    urls,
+    uploads, urls,
 };
 
 pub struct ApiError(StatusCode, serde_json::Value);
@@ -49,7 +49,12 @@ impl IntoResponse for ApiError {
 type ApiResult<T> = Result<T, ApiError>;
 
 pub fn router(state: AppState) -> Router<AppState> {
+    let upload_limit = state.config.max_upload_bytes;
     Router::new()
+        .route(
+            "/api/jobs/upload",
+            post(upload).layer(DefaultBodyLimit::max(upload_limit)),
+        )
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/config", get(config))
         .route("/api/stats", get(stats))
@@ -150,6 +155,27 @@ async fn create(
     State(state): State<AppState>,
     Json(req): Json<CreateJob>,
 ) -> ApiResult<(StatusCode, Json<db::Job>)> {
+    enqueue_url(&state, req).await
+}
+
+fn clean_tags<'a>(tags: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+    tags.into_iter()
+        .flat_map(|t| t.split(','))
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+async fn created(state: &AppState, id: i64) -> ApiResult<(StatusCode, Json<db::Job>)> {
+    state.wake.notify_waiters();
+    state.publish_job(id).await;
+    let job = db::get_summary(&state.db, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn enqueue_url(state: &AppState, req: CreateJob) -> ApiResult<(StatusCode, Json<db::Job>)> {
     let url = urls::extract(&req.url)
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "that doesn't look like a link"))?;
     let source = match req.source.as_deref().unwrap_or("auto") {
@@ -171,20 +197,108 @@ async fn create(
             ));
         }
     }
-    let tags: Vec<String> = req
-        .tags
-        .iter()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .collect();
+    let tags = clean_tags(&req.tags);
     let note = req.note.as_deref().map(str::trim).filter(|n| !n.is_empty());
     let id = db::insert_job(&state.db, &url, source, &tags, note).await?;
-    state.wake.notify_waiters();
-    state.publish_job(id).await;
-    let job = db::get_summary(&state.db, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    Ok((StatusCode::CREATED, Json(job)))
+    created(state, id).await
+}
+
+/// Multipart import: files (photos, screenshots, recipe text, a Mealie .zip, a
+/// video or voice memo), or a `url`/`text` field. A link sent any of these ways
+/// becomes a normal link job; plain text is imported as a recipe.
+async fn upload(
+    State(state): State<AppState>,
+    mut form: Multipart,
+) -> ApiResult<(StatusCode, Json<db::Job>)> {
+    let bad = |m: String| ApiError::new(StatusCode::BAD_REQUEST, m);
+    let mut uploads: Vec<uploads::Upload> = Vec::new();
+    let mut links: Vec<String> = Vec::new();
+    let mut tags: Vec<String> = Vec::new();
+    let (mut note, mut source, mut force) = (None, None, false);
+    while let Some(field) = form
+        .next_field()
+        .await
+        .map_err(|e| bad(format!("could not read the upload: {e}")))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        let file_name = field.file_name().map(str::to_string);
+        let content_type = field.content_type().map(str::to_string);
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| bad(format!("could not read the upload: {e}")))?;
+        let as_text = || String::from_utf8_lossy(&bytes).trim().to_string();
+        match name.as_str() {
+            "tags" => tags.push(as_text()),
+            "note" => note = Some(as_text()).filter(|n| !n.is_empty()),
+            "source" => source = Some(as_text()),
+            "force" => force = matches!(as_text().as_str(), "true" | "1" | "yes" | "on"),
+            _ => {
+                if bytes.is_empty() {
+                    continue;
+                }
+                let label = file_name.clone().unwrap_or_else(|| "pasted.txt".into());
+                match uploads::classify(&label, content_type.as_deref(), &bytes) {
+                    Some(uploads::Classified::Link(url)) => links.push(url),
+                    Some(uploads::Classified::File(kind)) => uploads.push(uploads::Upload {
+                        name: label,
+                        kind,
+                        bytes: bytes.to_vec(),
+                    }),
+                    None => {
+                        return Err(bad(format!(
+                            "{label}: unsupported file (send photos, screenshots, text, a Mealie .zip, or a video/audio file)"
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    if uploads.is_empty() {
+        let Some(url) = links.into_iter().next() else {
+            return Err(bad("nothing to import: attach a file or send a link".into()));
+        };
+        let req = CreateJob {
+            url,
+            tags,
+            note,
+            source,
+            force,
+        };
+        return enqueue_url(&state, req).await;
+    }
+
+    let kinds: Vec<uploads::Kind> = uploads.iter().map(|u| u.kind).collect();
+    let media_kind = uploads::media_kind(&kinds).map_err(|e| bad(format!("{e:#}")))?;
+    let tags = clean_tags(&tags);
+    let first = uploads[0].name.clone();
+    let title = if uploads.len() == 1 {
+        first.clone()
+    } else {
+        format!("{first} + {} more", uploads.len() - 1)
+    };
+
+    // The worker can't claim the job until the files are on disk and this commits.
+    let mut tx = state.db.begin().await.map_err(anyhow::Error::from)?;
+    let id = db::insert_job(
+        &mut *tx,
+        &format!("upload:{first}"),
+        "file",
+        &tags,
+        note.as_deref(),
+    )
+    .await?;
+    sqlx::query("UPDATE jobs SET title = ?, platform = 'Upload', media_kind = ? WHERE id = ?")
+        .bind(&title)
+        .bind(media_kind)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(anyhow::Error::from)?;
+    uploads::store(&state.config.upload_dir, id, &uploads).await?;
+    tx.commit().await.map_err(anyhow::Error::from)?;
+    created(&state, id).await
 }
 
 async fn detail(
@@ -254,6 +368,12 @@ async fn remove(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult
             "running jobs can't be deleted",
         ));
     }
+    let dir = uploads::job_dir(&state.config.upload_dir, id);
+    if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("could not remove {}: {e}", dir.display());
+        }
+    }
     let _ = state.updates.send(Update::Deleted { id });
     Ok(StatusCode::NO_CONTENT)
 }
@@ -268,6 +388,9 @@ async fn clear(
     Query(q): Query<ClearQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let removed = db::clear_finished(&state.db, q.status.as_deref().unwrap_or("finished")).await?;
+    if let Err(e) = uploads::prune(&state.db, &state.config.upload_dir).await {
+        tracing::warn!("could not prune uploads: {e:#}");
+    }
     let _ = state.updates.send(Update::Refresh);
     Ok(Json(json!({ "removed": removed })))
 }

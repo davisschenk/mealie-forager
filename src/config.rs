@@ -5,6 +5,8 @@ use std::{env, net::SocketAddr, path::PathBuf};
 pub struct Config {
     pub listen: SocketAddr,
     pub database_path: PathBuf,
+    pub upload_dir: PathBuf,
+    pub max_upload_bytes: usize,
     pub work_dir: PathBuf,
     pub workers: usize,
     pub max_duration_secs: f64,
@@ -48,14 +50,31 @@ fn url_var(name: &str) -> Option<String> {
 impl Config {
     pub fn from_env() -> Result<Self> {
         let mealie_url = url_var("MEALIE_URL").context("MEALIE_URL must be set")?;
+        let database_path: PathBuf = var("DATABASE_PATH")
+            .unwrap_or_else(|| "mealie-forager.db".into())
+            .into();
+        let upload_dir = var("UPLOAD_DIR").map_or_else(
+            || {
+                database_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new(""))
+                    .join("uploads")
+            },
+            PathBuf::from,
+        );
         Ok(Self {
             listen: var("LISTEN_ADDR")
                 .unwrap_or_else(|| "127.0.0.1:3000".into())
                 .parse()
                 .context("LISTEN_ADDR is not a socket address")?,
-            database_path: var("DATABASE_PATH")
-                .unwrap_or_else(|| "mealie-forager.db".into())
-                .into(),
+            database_path,
+            upload_dir,
+            max_upload_bytes: var("MAX_UPLOAD_MB")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(100)
+                .max(1)
+                * 1024
+                * 1024,
             work_dir: var("WORK_DIR").map_or_else(env::temp_dir, PathBuf::from),
             workers: var("WORKERS")
                 .and_then(|v| v.parse().ok())
