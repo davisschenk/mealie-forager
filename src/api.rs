@@ -1,5 +1,5 @@
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, Path, Query, Request, State},
+    extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{
@@ -203,47 +203,159 @@ async fn enqueue_url(state: &AppState, req: CreateJob) -> ApiResult<(StatusCode,
     created(state, id).await
 }
 
-/// Multipart import: files (photos, screenshots, recipe text, a Mealie .zip, a
-/// video or voice memo), or a `url`/`text` field. A link sent any of these ways
-/// becomes a normal link job; plain text is imported as a recipe.
+/// One field of an upload request, whatever format it arrived in.
+struct Part {
+    name: String,
+    file_name: Option<String>,
+    content_type: Option<String>,
+    bytes: Vec<u8>,
+}
+
+impl Part {
+    fn text(name: &str, value: impl Into<String>) -> Self {
+        Part {
+            name: name.into(),
+            file_name: None,
+            content_type: None,
+            bytes: value.into().into_bytes(),
+        }
+    }
+}
+
+fn json_parts(value: serde_json::Value) -> Vec<Part> {
+    let mut parts = Vec::new();
+    for (key, value) in value.as_object().into_iter().flatten() {
+        let values = match value {
+            serde_json::Value::Array(items) => items.clone(),
+            other => vec![other.clone()],
+        };
+        for v in values {
+            match v {
+                serde_json::Value::String(s) => parts.push(Part::text(key, s)),
+                serde_json::Value::Bool(b) => parts.push(Part::text(key, b.to_string())),
+                serde_json::Value::Number(n) => parts.push(Part::text(key, n.to_string())),
+                _ => {}
+            }
+        }
+    }
+    parts
+}
+
+fn form_parts(bytes: &[u8]) -> Vec<Part> {
+    url::form_urlencoded::parse(bytes)
+        .map(|(k, v)| Part::text(&k, v.into_owned()))
+        .collect()
+}
+
+/// Reads the request as multipart, URL-encoded or JSON fields, or else as one
+/// raw file (optional fields then come from the query string).
+async fn read_parts(state: &AppState, req: Request) -> Result<Vec<Part>, ApiError> {
+    let bad = |m: String| ApiError::new(StatusCode::BAD_REQUEST, m);
+    let content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if mime == "multipart/form-data" {
+        let mut form = Multipart::from_request(req, state)
+            .await
+            .map_err(|e| {
+                bad(format!(
+                    "could not read the upload: {} (don't set a Content-Type header yourself; let the client add it)",
+                    e.body_text()
+                ))
+            })?;
+        let mut parts = Vec::new();
+        while let Some(field) = form
+            .next_field()
+            .await
+            .map_err(|e| bad(format!("could not read the upload: {e}")))?
+        {
+            parts.push(Part {
+                name: field.name().unwrap_or_default().to_string(),
+                file_name: field.file_name().map(str::to_string),
+                content_type: field.content_type().map(str::to_string),
+                bytes: field
+                    .bytes()
+                    .await
+                    .map_err(|e| bad(format!("could not read the upload: {e}")))?
+                    .to_vec(),
+            });
+        }
+        return Ok(parts);
+    }
+    let query = req.uri().query().unwrap_or_default().to_string();
+    let bytes = axum::body::to_bytes(req.into_body(), state.config.max_upload_bytes)
+        .await
+        .map_err(|e| bad(format!("could not read the upload: {e}")))?;
+    let mut parts = match mime.as_str() {
+        "application/x-www-form-urlencoded" => form_parts(&bytes),
+        "application/json" => json_parts(
+            serde_json::from_slice(&bytes).map_err(|e| bad(format!("invalid JSON: {e}")))?,
+        ),
+        _ => vec![Part {
+            name: "file".into(),
+            file_name: None,
+            content_type: Some(content_type).filter(|c| !c.is_empty()),
+            bytes: bytes.to_vec(),
+        }],
+    };
+    parts.extend(form_parts(query.as_bytes()));
+    Ok(parts)
+}
+
+/// Import from files (photos, screenshots, recipe text, a Mealie .zip, a video
+/// or voice memo) or a `url`/`text` field. A link sent any of these ways becomes
+/// a normal link job; plain text is imported as a recipe.
 async fn upload(
     State(state): State<AppState>,
-    mut form: Multipart,
+    req: Request,
 ) -> ApiResult<(StatusCode, Json<db::Job>)> {
     let bad = |m: String| ApiError::new(StatusCode::BAD_REQUEST, m);
     let mut uploads: Vec<uploads::Upload> = Vec::new();
     let mut links: Vec<String> = Vec::new();
     let mut tags: Vec<String> = Vec::new();
     let (mut note, mut source, mut force) = (None, None, false);
-    while let Some(field) = form
-        .next_field()
-        .await
-        .map_err(|e| bad(format!("could not read the upload: {e}")))?
-    {
-        let name = field.name().unwrap_or_default().to_string();
-        let file_name = field.file_name().map(str::to_string);
-        let content_type = field.content_type().map(str::to_string);
-        let bytes = field
-            .bytes()
-            .await
-            .map_err(|e| bad(format!("could not read the upload: {e}")))?;
-        let as_text = || String::from_utf8_lossy(&bytes).trim().to_string();
-        match name.as_str() {
+    for part in read_parts(&state, req).await? {
+        let as_text = || String::from_utf8_lossy(&part.bytes).trim().to_string();
+        match part.name.as_str() {
             "tags" => tags.push(as_text()),
             "note" => note = Some(as_text()).filter(|n| !n.is_empty()),
             "source" => source = Some(as_text()),
             "force" => force = matches!(as_text().as_str(), "true" | "1" | "yes" | "on"),
             _ => {
-                if bytes.is_empty() {
+                if part.bytes.is_empty() {
                     continue;
                 }
-                let label = file_name.clone().unwrap_or_else(|| "pasted.txt".into());
-                match uploads::classify(&label, content_type.as_deref(), &bytes) {
+                let from_type = part.content_type.as_deref().and_then(|t| {
+                    let (top, sub) = t.split(';').next()?.trim().split_once('/')?;
+                    matches!(top, "image" | "video" | "audio")
+                        .then(|| format!("upload.{}", sub.trim_start_matches("x-")))
+                });
+                let label =
+                    part.file_name.clone().or(from_type).unwrap_or_else(
+                        || match uploads::classify("", part.content_type.as_deref(), &part.bytes) {
+                            Some(uploads::Classified::File(uploads::Kind::Image)) => "image".into(),
+                            Some(uploads::Classified::File(uploads::Kind::Media)) => "media".into(),
+                            Some(uploads::Classified::File(uploads::Kind::Zip)) => {
+                                "export.zip".into()
+                            }
+                            _ => "pasted.txt".into(),
+                        },
+                    );
+                match uploads::classify(&label, part.content_type.as_deref(), &part.bytes) {
                     Some(uploads::Classified::Link(url)) => links.push(url),
                     Some(uploads::Classified::File(kind)) => uploads.push(uploads::Upload {
                         name: label,
                         kind,
-                        bytes: bytes.to_vec(),
+                        bytes: part.bytes,
                     }),
                     None => {
                         return Err(bad(format!(

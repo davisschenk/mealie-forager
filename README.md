@@ -73,12 +73,18 @@ job is running, the job goes back into the queue on the next start.
 
 ## API and iOS Shortcut
 
-`POST /api/jobs/upload` takes a multipart form. Send one or more `file` fields
-(photos, text, a Mealie `.zip`, or a video/audio file), or a `url` or `text`
-field. The optional fields are `tags` (comma-separated or repeated), `note`,
-`source`, and `force`. `POST /api/jobs` with a JSON body queues a link. `url` is required, and `tags`,
-`note`, and `source` are optional. The response is `201` with the job, or `409` if
-the link was already imported (send `"force": true` to import it again).
+`POST /api/jobs/upload` queues an import. Send one or more `file` fields (photos,
+text, a Mealie `.zip`, or a video/audio file), or a `url` or `text` field. The
+optional fields are `tags` (comma-separated or repeated), `note`, `source`, and
+`force`. The body can be a multipart form, a URL-encoded form, or JSON. It can
+also be a raw file as the whole body, with the optional fields in the query
+string.
+
+`POST /api/jobs` queues a link from a JSON body with `url`, plus optional `tags`,
+`note`, and `source`.
+
+Both endpoints respond `201` with the job, or `409` if the link was already
+imported. Send `force` as true to import it again.
 
 API clients authenticate with `Authorization: Bearer <token>`. The token is
 generated on first start and stored in the database. The web UI's "iOS Shortcut"
