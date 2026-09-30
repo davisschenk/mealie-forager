@@ -208,6 +208,12 @@ nix flake check  # builds the package, which also runs the tests
 docker build -t mealie-forager .
 ```
 
+## Contributing
+
+Bug reports and pull requests are welcome. Please run `cargo fmt`, `cargo clippy`
+and `cargo test` before opening a PR. See [CHANGELOG.md](CHANGELOG.md) for what
+has changed between versions.
+
 ## License
 
 [MIT](LICENSE)
