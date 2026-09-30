@@ -4,6 +4,33 @@ Turns recipe posts from TikTok, Instagram, YouTube, and similar sites (or any re
 website Mealie can scrape) into clean, structured Mealie recipes. It's a Rust (axum + SQLite) service with a persistent job queue and a live
 web UI. The UI is plain HTML, CSS, and JS embedded in the binary.
 
+## Quick start (Docker)
+
+You need a running [Mealie](https://mealie.io) (3.28+ for photo and text imports) and an
+OpenAI API key, or a key for any OpenAI-compatible API that offers chat and
+transcription models.
+
+1. In Mealie, open your profile → **API Tokens** and generate a token.
+2. Download [`docker-compose.yml`](docker-compose.yml) and
+   [`.env.example`](.env.example) into a folder, rename `.env.example` to `.env`,
+   and fill in `MEALIE_URL`, `MEALIE_API_KEY`, `OPENAI_API_KEY`, and
+   `AUTH_PASSWORD`.
+3. Run `docker compose up -d` and open `http://<host>:3000`. Log in with any
+   username and your `AUTH_PASSWORD`.
+
+If Mealie runs in the same compose project, add Forager as another service and
+point `MEALIE_URL` at Mealie's service name (e.g. `http://mealie:9000`). Also set
+`MEALIE_PUBLIC_URL` to the address you open Mealie at, so links in the UI work.
+
+The image (`ghcr.io/davisschenk/mealie-forager`, amd64 and arm64) bundles
+`yt-dlp`, `gallery-dl`, `ffmpeg`, and Deno (which `yt-dlp` needs for YouTube).
+Its data (the job database and uploads) lives in `/data`. Sites change often and
+`yt-dlp` has to keep up, so pull a newer image if downloads start failing.
+
+Every job costs a few OpenAI calls: a transcription for videos and one or more
+chat requests to extract and clean the recipe. Keep an eye on your OpenAI usage
+when you first start.
+
 ## Pipeline
 
 Each job has a source. By default it is picked from the link: posts from social
@@ -96,9 +123,23 @@ imported. Send `force` as true to import it again.
 API clients authenticate with `Authorization: Bearer <token>`. The token is
 generated on first start and stored in the database. The web UI's "iOS Shortcut"
 panel shows it and can regenerate it. A request with a wrong token gets a `401`.
-Requests without an `Authorization` header aren't checked, so keep the UI behind a
-proxy that authenticates them. The proxy can let requests that carry a Bearer
-header through to `/api/jobs` without its login.
+
+## Security
+
+Anyone who can open the UI can read the API token and queue jobs that spend your
+OpenAI credits, so don't expose it unprotected. There are two options:
+
+- Set `AUTH_PASSWORD`. The browser then asks for a login (any username, that
+  password) on every page and API call, except `/healthz` and the app icons.
+  Bearer-token requests skip the login, so the Shortcut keeps working.
+- Leave `AUTH_PASSWORD` unset and put Forager behind a reverse proxy that
+  authenticates (Authelia, Authentik, Cloudflare Access, …). Without a
+  password, requests with no `Authorization` header aren't checked. The proxy can
+  let requests that carry a Bearer header through to `/api/jobs` without its
+  login.
+
+Use HTTPS (from your proxy or tunnel) whenever Forager is reachable from outside
+your network, since Basic auth and the token are otherwise sent in the clear.
 
 For an iOS Shortcut that shows up in the share sheet (accepting URLs, Text,
 Images, Media, and Files), add **Get Contents of URL** to
@@ -110,11 +151,12 @@ handles links, photos, screenshots, and videos.
 
 ## Configuration
 
-Settings come from environment variables:
+Settings come from environment variables ([`.env.example`](.env.example) lists them with comments):
 
 | Variable | Default |
 | --- | --- |
 | `OPENAI_API_KEY`, `MEALIE_API_KEY`, `MEALIE_URL` | required |
+| `AUTH_PASSWORD` | unset (no built-in login; see [Security](#security)) |
 | `MEALIE_PUBLIC_URL` | `MEALIE_URL` (used for links in the UI) |
 | `MEALIE_GROUP_NAME` | `home` |
 | `OPENAI_URL` | `https://api.openai.com/v1` |
@@ -123,8 +165,8 @@ Settings come from environment variables:
 | `CLEANUP` | `true` (set `false` to skip the Clean stage) |
 | `CLEAN_MODEL` | `TEXT_MODEL` |
 | `CLEAN_TAG` | `Imported Clean` |
-| `LISTEN_ADDR` | `127.0.0.1:3000` |
-| `DATABASE_PATH` | `mealie-forager.db` |
+| `LISTEN_ADDR` | `127.0.0.1:3000` (`0.0.0.0:3000` in Docker) |
+| `DATABASE_PATH` | `mealie-forager.db` (`/data/mealie-forager.db` in Docker) |
 | `UPLOAD_DIR` | `uploads/` next to the database |
 | `MAX_UPLOAD_MB` | `100` (Cloudflare Tunnel's request limit) |
 | `WORK_DIR` | system temp dir |
@@ -146,14 +188,15 @@ Settings come from environment variables:
     port = 4000;
     mealieUrl = "http://127.0.0.1:9000";
     mealiePublicUrl = "https://mealie.example.com";
-    environmentFile = "/run/secrets/mealie-forager.env"; # OPENAI_API_KEY, MEALIE_API_KEY
+    # OPENAI_API_KEY, MEALIE_API_KEY, and optionally AUTH_PASSWORD
+    environmentFile = "/run/secrets/mealie-forager.env";
   };
 }
 ```
 
 The service runs as a `DynamicUser` and keeps its database in
-`/var/lib/private/mealie-forager`. Put the UI behind your own authentication; it has
-none of its own apart from the API token described above.
+`/var/lib/private/mealie-forager`. Set `AUTH_PASSWORD` in the environment file or
+put the UI behind your own authentication (see [Security](#security)).
 
 ## Development
 
@@ -162,4 +205,15 @@ nix develop      # cargo, clippy, yt-dlp, ffmpeg, gallery-dl
 cargo test
 OPENAI_API_KEY=… MEALIE_API_KEY=… MEALIE_URL=http://localhost:9000 cargo run
 nix flake check  # builds the package, which also runs the tests
+docker build -t mealie-forager .
 ```
+
+## Contributing
+
+Bug reports and pull requests are welcome. Please run `cargo fmt`, `cargo clippy`
+and `cargo test` before opening a PR. See [CHANGELOG.md](CHANGELOG.md) for what
+has changed between versions.
+
+## License
+
+[MIT](LICENSE)

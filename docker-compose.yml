@@ -1,0 +1,14 @@
+# Copy .env.example to .env, fill it in, then run `docker compose up -d`.
+services:
+  mealie-forager:
+    image: ghcr.io/davisschenk/mealie-forager:latest
+    container_name: mealie-forager
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3000:3000"
+    volumes:
+      - mealie-forager-data:/data
+
+volumes:
+  mealie-forager-data:

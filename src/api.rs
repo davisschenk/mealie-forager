@@ -1,7 +1,7 @@
 use axum::{
     extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State},
     http::{header, StatusCode},
-    middleware::{self, Next},
+    middleware::Next,
     response::{
         sse::{self, KeepAlive, Sse},
         IntoResponse, Response,
@@ -49,7 +49,7 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-pub fn router(state: AppState) -> Router<AppState> {
+pub fn router(state: &AppState) -> Router<AppState> {
     let upload_limit = state.config.max_upload_bytes;
     Router::new()
         .route(
@@ -71,33 +71,74 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/api/token", get(token))
         .route("/api/token/rotate", post(rotate_token))
-        .layer(middleware::from_fn_with_state(state, bearer_auth))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// Requests carrying an Authorization header must present the API token. The
-/// reverse proxy lets only those skip its login, so this is what guards them;
-/// requests without the header are the browser UI behind the proxy's login.
-async fn bearer_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    if let Some(value) = req.headers().get(header::AUTHORIZATION) {
-        let presented = value
-            .to_str()
-            .ok()
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(str::trim)
-            .unwrap_or_default();
-        let valid = {
+/// Paths anyone may fetch: the health check, and the icons and manifest a
+/// phone fetches without credentials when the UI is added to the home screen.
+const PUBLIC_PATHS: &[&str] = &[
+    "/healthz",
+    "/manifest.webmanifest",
+    "/icon.svg",
+    "/icon-192.png",
+    "/icon-512.png",
+    "/apple-touch-icon.png",
+];
+
+/// Guards every route. A Bearer header must carry the API token. With
+/// `AUTH_PASSWORD` set, everything else needs HTTP Basic auth with that
+/// password (any username). Without it, requests with no Authorization header
+/// pass, which assumes a reverse proxy in front does the login.
+pub async fn auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    if PUBLIC_PATHS.contains(&req.uri().path()) {
+        return next.run(req).await;
+    }
+    let header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .map(|v| v.to_str().unwrap_or_default().trim());
+    let password = state.config.auth_password.as_deref();
+    let allowed = match (header, password) {
+        (Some(value), _) if value.starts_with("Bearer ") => {
+            let presented = value["Bearer ".len()..].trim();
             let token = state.api_token.read().unwrap();
-            constant_time_eq(presented.as_bytes(), token.as_bytes())
-        };
-        if !valid {
-            return ApiError::new(StatusCode::UNAUTHORIZED, "invalid API token").into_response();
+            if !constant_time_eq(presented.as_bytes(), token.as_bytes()) {
+                return ApiError::new(StatusCode::UNAUTHORIZED, "invalid API token")
+                    .into_response();
+            }
+            true
         }
+        (Some(value), Some(password)) => basic_password(value)
+            .is_some_and(|p| constant_time_eq(p.as_bytes(), password.as_bytes())),
+        (None, Some(_)) => false,
+        (Some(_), None) => {
+            return ApiError::new(StatusCode::UNAUTHORIZED, "invalid API token").into_response()
+        }
+        (None, None) => true,
+    };
+    if !allowed {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"Mealie Forager\"")],
+            "authentication required",
+        )
+            .into_response();
     }
     next.run(req).await
+}
+
+/// The password from an HTTP Basic `Authorization` header value.
+fn basic_password(value: &str) -> Option<String> {
+    use base64::Engine;
+    let encoded = value.strip_prefix("Basic ")?.trim();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    decoded.split_once(':').map(|(_, p)| p.to_string())
 }
 
 async fn token(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -682,4 +723,20 @@ async fn events(
         [(header::HeaderName::from_static("x-accel-buffering"), "no")],
         Sse::new(stream).keep_alive(KeepAlive::default()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_basic_auth_password() {
+        // "anyone:s3cret:with-colon"
+        assert_eq!(
+            basic_password("Basic YW55b25lOnMzY3JldDp3aXRoLWNvbG9u").as_deref(),
+            Some("s3cret:with-colon")
+        );
+        assert_eq!(basic_password("Basic !!!"), None);
+        assert_eq!(basic_password("Bearer abc"), None);
+    }
 }

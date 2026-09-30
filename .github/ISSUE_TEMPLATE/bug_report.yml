@@ -1,0 +1,36 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: link
+    attributes:
+      label: Link or file type
+      description: The post or page you imported (if it's public), or the kind of file you uploaded.
+  - type: textarea
+    id: log
+    attributes:
+      label: Job log
+      description: The job's log from the UI, or the container logs. Remove anything private.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Forager version
+      description: Image tag or commit, e.g. `ghcr.io/davisschenk/mealie-forager:0.1.0`
+  - type: input
+    id: mealie
+    attributes:
+      label: Mealie version
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you run it
+      options: [Docker, NixOS module, Built from source]
