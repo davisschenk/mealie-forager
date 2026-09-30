@@ -40,20 +40,59 @@ const SOCIAL_HOSTS: &[&str] = &[
     "snapchat.com",
 ];
 
-/// Whether the URL is a social-media post rather than a recipe web page.
-pub fn is_social(raw: &str) -> bool {
-    let Some(host) = Url::parse(raw)
+/// Where a recipe link comes from, for the source tag: `(host, name)`. Hosts
+/// not listed here are "Website".
+const SOURCE_NAMES: &[(&str, &str)] = &[
+    ("tiktok.com", "TikTok"),
+    ("instagram.com", "Instagram"),
+    ("youtube.com", "YouTube"),
+    ("youtu.be", "YouTube"),
+    ("facebook.com", "Facebook"),
+    ("fb.watch", "Facebook"),
+    ("pinterest.com", "Pinterest"),
+    ("pin.it", "Pinterest"),
+    ("x.com", "X"),
+    ("twitter.com", "X"),
+    ("threads.net", "Threads"),
+    ("threads.com", "Threads"),
+    ("reddit.com", "Reddit"),
+    ("redd.it", "Reddit"),
+    ("vimeo.com", "Vimeo"),
+    ("snapchat.com", "Snapchat"),
+];
+
+fn host(raw: &str) -> Option<String> {
+    Url::parse(raw)
         .ok()
         .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-    else {
+}
+
+/// Whether `host` is `site` or one of its subdomains.
+fn on_site(host: &str, site: &str) -> bool {
+    host == site
+        || host.strip_suffix(site).is_some_and(|rest| rest.ends_with('.'))
+        // pinterest.co.uk, pinterest.de, …
+        || (site.starts_with("pinterest.") && host.split('.').any(|l| l == "pinterest"))
+}
+
+/// Whether the URL is a social-media post rather than a recipe web page.
+pub fn is_social(raw: &str) -> bool {
+    let Some(host) = host(raw) else {
         return false;
     };
-    SOCIAL_HOSTS.iter().any(|s| {
-        host == *s
-            || host.strip_suffix(s).is_some_and(|rest| rest.ends_with('.'))
-            // pinterest.co.uk, pinterest.de, …
-            || (s.starts_with("pinterest.") && host.split('.').any(|l| l == "pinterest"))
-    })
+    SOCIAL_HOSTS.iter().any(|s| on_site(&host, s))
+}
+
+/// The name of the site a recipe link comes from ("TikTok", "Instagram", …),
+/// or "Website" for any other page. None when `raw` isn't a URL.
+pub fn source_name(raw: &str) -> Option<&'static str> {
+    let host = host(raw)?;
+    Some(
+        SOURCE_NAMES
+            .iter()
+            .find(|(site, _)| on_site(&host, site))
+            .map_or("Website", |(_, name)| *name),
+    )
 }
 
 /// Pulls the first http(s) URL out of text shared from a mobile app.
@@ -128,5 +167,24 @@ mod tests {
         assert!(is_social("https://www.pinterest.co.uk/pin/1"));
         assert!(!is_social("https://www.seriouseats.com/garlic-noodles"));
         assert!(!is_social("https://notyoutube.com/x"));
+    }
+
+    #[test]
+    fn names_link_sources() {
+        assert_eq!(source_name("https://vm.tiktok.com/abc"), Some("TikTok"));
+        assert_eq!(
+            source_name("https://www.instagram.com/reel/abc/"),
+            Some("Instagram")
+        );
+        assert_eq!(source_name("https://youtu.be/abc"), Some("YouTube"));
+        assert_eq!(
+            source_name("https://www.pinterest.de/pin/1"),
+            Some("Pinterest")
+        );
+        assert_eq!(
+            source_name("https://www.seriouseats.com/garlic-noodles"),
+            Some("Website")
+        );
+        assert_eq!(source_name(""), None);
     }
 }

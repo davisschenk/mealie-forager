@@ -82,6 +82,10 @@ After any of these paths, a **Clean** stage tidies the recipe in Mealie:
 - The recipe is given one to three of your existing Mealie categories (meal type,
   course, cuisine, whatever your list covers). Categories are never created, and
   ones the recipe already has are kept.
+- The recipe's tools are filled in when the recipe names or clearly needs
+  equipment (air fryer, stand mixer, sheet pan, …). Existing Mealie tools are
+  reused, ignoring case and plurals, and missing ones are created. Everyday basics
+  such as knives and bowls are left out.
 - Hashtag tags are removed and unused hashtag tags are deleted. Last of all, the
   recipe gets the `Imported Clean` tag.
 
@@ -92,8 +96,13 @@ the recipes without the clean tag, and one button queues a clean for all of
 them. The API equivalents are `POST /api/clean` (`{"slug": …}` or `{"url": …}`)
 and `GET`/`POST /api/clean/library`. Clean-only jobs wait behind new imports.
 
-Imports only add the tags you give the job. A website's SEO keywords and the
-model's keywords aren't turned into tags, since categories cover the same ground.
+Imports add the tags you give the job plus a source tag saying where the recipe
+came from: `TikTok`, `Instagram`, `YouTube`, `Facebook`, `Pinterest`, `X`,
+`Threads`, `Reddit`, `Vimeo`, or `Snapchat` for those sites, `Website` for any other
+link, and `Upload` for files. Recipes already in Mealie get it from their original
+link when they're cleaned. Set `SOURCE_TAGS=false` to turn this off. A website's SEO
+keywords and the model's keywords aren't turned into tags, since categories cover
+the same ground.
 
 Anything the model thinks needs a human look shows up as a warning in the job log.
 If the cleanup fails, the recipe stays in Mealie without the tag. Retrying the job
@@ -165,6 +174,7 @@ Settings come from environment variables ([`.env.example`](.env.example) lists t
 | `CLEANUP` | `true` (set `false` to skip the Clean stage) |
 | `CLEAN_MODEL` | `TEXT_MODEL` |
 | `CLEAN_TAG` | `Imported Clean` |
+| `SOURCE_TAGS` | `true` (set `false` to skip the TikTok/Instagram/Website/… tag) |
 | `LISTEN_ADDR` | `127.0.0.1:3000` (`0.0.0.0:3000` in Docker) |
 | `DATABASE_PATH` | `mealie-forager.db` (`/data/mealie-forager.db` in Docker) |
 | `UPLOAD_DIR` | `uploads/` next to the database |

@@ -235,6 +235,21 @@ impl Mealie<'_> {
             .await
     }
 
+    pub async fn tools(&self) -> Result<Vec<Value>> {
+        self.items("/api/organizers/tools", &[("perPage", "-1")])
+            .await
+    }
+
+    pub async fn create_tool(&self, name: &str) -> Result<Value> {
+        self.call(
+            self.http
+                .post(self.url("/api/organizers/tools"))
+                .json(&json!({ "name": name })),
+            "tool creation",
+        )
+        .await
+    }
+
     pub async fn search_foods(&self, search: &str) -> Result<Vec<Value>> {
         self.items("/api/foods", &[("search", search), ("perPage", "15")])
             .await

@@ -15,7 +15,7 @@ use crate::{
     media::{self, Media, MediaInfo},
     openai::{ExtractInput, OpenAi},
     state::AppState,
-    uploads,
+    uploads, urls,
 };
 
 pub async fn run(state: AppState, index: usize) {
@@ -185,7 +185,30 @@ async fn pipeline(ctx: &Ctx<'_>) -> Result<String> {
     if job.source == "mealie" {
         ctx.info("Cleaning a recipe already in Mealie").await;
     }
-    clean_recipe(ctx, &mealie, &slug, job.note.as_deref()).await
+    // Imports tag their recipe's source themselves; a recipe that was already in
+    // Mealie gets it from its original link during the cleanup.
+    let tag_source = job.source == "mealie" && state.config.source_tags;
+    clean_recipe(ctx, &mealie, &slug, job.note.as_deref(), tag_source).await
+}
+
+/// The tags an import adds: the job's own, plus where the recipe came from
+/// ("TikTok", "Instagram", "Website", "Upload", …) unless SOURCE_TAGS is off.
+fn import_tags(ctx: &Ctx<'_>, job: &Job) -> Vec<String> {
+    let mut tags = job.tags.0.clone();
+    if !ctx.state.config.source_tags {
+        return tags;
+    }
+    let source = if job.source == "file" {
+        Some("Upload")
+    } else {
+        urls::source_name(&job.url)
+    };
+    if let Some(source) = source {
+        if !tags.iter().any(|t| t.eq_ignore_ascii_case(source)) {
+            tags.push(source.to_string());
+        }
+    }
+    tags
 }
 
 async fn import(ctx: &Ctx<'_>, job: &Job, mealie: &Mealie<'_>) -> Result<String> {
@@ -262,9 +285,10 @@ async fn finish_mealie_import(
     ))
     .await;
 
-    if !job.tags.0.is_empty() {
+    let names = import_tags(ctx, job);
+    if !names.is_empty() {
         let mut tags = Vec::new();
-        for name in &job.tags.0 {
+        for name in &names {
             tags.push(mealie.ensure_tag(name).await?);
         }
         mealie::merge_tags(&mut recipe, &tags, false);
@@ -272,8 +296,7 @@ async fn finish_mealie_import(
         if let Some(new) = saved["slug"].as_str().filter(|s| *s != slug) {
             db::set_slug(&state.db, job.id, new).await?;
         }
-        ctx.info(format!("Tagged with {}", job.tags.0.join(", ")))
-            .await;
+        ctx.info(format!("Tagged with {}", names.join(", "))).await;
         recipe = saved;
     }
     let slug = recipe["slug"].as_str().unwrap_or(slug).to_string();
@@ -415,7 +438,7 @@ async fn import_upload_media(
     };
     ctx.enter(Stage::Import).await?;
     ctx.info("Sending recipe to Mealie").await;
-    let ld = mealie::to_json_ld(&recipe, "", None, &job.tags.0);
+    let ld = mealie::to_json_ld(&recipe, "", None, &import_tags(ctx, job));
     let slug = mealie.create_from_json_ld(&ld, "").await?;
     db::set_slug(&state.db, job.id, &slug).await?;
     ctx.info(format!("Created {}", config.mealie_recipe_link(&slug)))
@@ -625,7 +648,12 @@ async fn import_post(
 
     ctx.enter(Stage::Import).await?;
     ctx.info("Sending recipe to Mealie").await;
-    let ld = mealie::to_json_ld(&recipe, &job.url, info.thumbnail.as_deref(), tags);
+    let ld = mealie::to_json_ld(
+        &recipe,
+        &job.url,
+        info.thumbnail.as_deref(),
+        &import_tags(ctx, job),
+    );
     let slug = mealie.create_from_json_ld(&ld, &job.url).await?;
     db::set_slug(&state.db, job.id, &slug).await?;
     ctx.info(format!("Created {}", config.mealie_recipe_link(&slug)))
@@ -634,12 +662,13 @@ async fn import_post(
 }
 
 /// Rebuilds the imported recipe with linked foods and units, tidy steps and
-/// metadata, then tags it as cleaned.
+/// metadata, then tags it as cleaned (and with its source when `tag_source`).
 async fn clean_recipe(
     ctx: &Ctx<'_>,
     mealie: &Mealie<'_>,
     slug: &str,
     note: Option<&str>,
+    tag_source: bool,
 ) -> Result<String> {
     let state = ctx.state;
     let config = &state.config;
@@ -654,6 +683,7 @@ async fn clean_recipe(
     }
     let units = clean::usable_units(mealie.units().await?);
     let categories = mealie.categories().await?;
+    let mut tools = mealie.tools().await?;
     ctx.info(format!(
         "Cleaning {} ingredient lines with {}",
         lines.len(),
@@ -679,6 +709,7 @@ async fn clean_recipe(
                 &lines,
                 &units,
                 &categories,
+                &tools,
                 Some(extra.as_str()).filter(|e| !e.is_empty())
             )),
             "recipe_cleanup",
@@ -731,6 +762,28 @@ async fn clean_recipe(
         ctx.warn("Mealie has no categories yet, so the recipe wasn't categorized")
             .await;
     }
+    let mut needed = Vec::new();
+    for name in plan
+        .tools
+        .iter()
+        .map(|n| n.trim())
+        .filter(|n| !n.is_empty())
+    {
+        let tool = match clean::find_tool(&tools, name) {
+            Some(tool) => tool.clone(),
+            None => {
+                let created = mealie.create_tool(name).await?;
+                ctx.info(format!("Created tool \"{name}\"")).await;
+                tools.push(created.clone());
+                created
+            }
+        };
+        needed.push(tool);
+    }
+    let added = clean::add_tools(&mut recipe, &needed);
+    if !added.is_empty() {
+        ctx.info(format!("Added tools {}", added.join(", "))).await;
+    }
     let saved = mealie.update_recipe(slug, &recipe).await?;
     let slug = saved["slug"].as_str().unwrap_or(slug).to_string();
     db::set_slug(&state.db, ctx.id, &slug).await?;
@@ -749,8 +802,17 @@ async fn clean_recipe(
         );
     }
 
-    let tag = mealie.ensure_tag(&config.clean_tag).await?;
-    mealie::merge_tags(&mut saved, &[tag], true);
+    let mut tags = vec![mealie.ensure_tag(&config.clean_tag).await?];
+    // The original link, unless it points back at this Mealie.
+    let source = saved["orgURL"]
+        .as_str()
+        .filter(|u| tag_source && config.mealie_slug_from_url(u).is_none())
+        .and_then(urls::source_name);
+    if let Some(source) = source {
+        tags.push(mealie.ensure_tag(source).await?);
+        ctx.info(format!("Tagged with {source}")).await;
+    }
+    mealie::merge_tags(&mut saved, &tags, true);
     let saved = mealie.update_recipe(&slug, &saved).await?;
     let slug = saved["slug"].as_str().unwrap_or(&slug).to_string();
     match mealie.delete_empty_hashtags().await {

@@ -21,6 +21,7 @@ pub struct Config {
     pub cleanup: bool,
     pub clean_model: String,
     pub clean_tag: String,
+    pub source_tags: bool,
 
     pub mealie_url: String,
     pub mealie_public_url: String,
@@ -42,6 +43,16 @@ fn var(name: &str) -> Option<String> {
 
 fn required(name: &str) -> Result<String> {
     var(name).with_context(|| format!("{name} must be set"))
+}
+
+/// A boolean that is on unless set to 0/false/no/off.
+fn flag(name: &str) -> bool {
+    var(name).is_none_or(|v| {
+        !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
 }
 
 fn url_var(name: &str) -> Option<String> {
@@ -92,16 +103,12 @@ impl Config {
             text_model: var("TEXT_MODEL").unwrap_or_else(|| "gpt-5-mini".into()),
             extra_prompt: var("EXTRA_PROMPT"),
 
-            cleanup: var("CLEANUP").is_none_or(|v| {
-                !matches!(
-                    v.to_ascii_lowercase().as_str(),
-                    "0" | "false" | "no" | "off"
-                )
-            }),
+            cleanup: flag("CLEANUP"),
             clean_model: var("CLEAN_MODEL")
                 .or_else(|| var("TEXT_MODEL"))
                 .unwrap_or_else(|| "gpt-5-mini".into()),
             clean_tag: var("CLEAN_TAG").unwrap_or_else(|| "Imported Clean".into()),
+            source_tags: flag("SOURCE_TAGS"),
 
             mealie_public_url: url_var("MEALIE_PUBLIC_URL").unwrap_or_else(|| mealie_url.clone()),
             mealie_url,
@@ -168,6 +175,7 @@ mod tests {
             cleanup: true,
             clean_model: String::new(),
             clean_tag: String::new(),
+            source_tags: true,
             mealie_url: "http://127.0.0.1:9925".into(),
             mealie_public_url: "https://mealie.example.com".into(),
             mealie_api_key: String::new(),

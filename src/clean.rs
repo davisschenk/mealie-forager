@@ -39,6 +39,8 @@ Metadata:\n\
 \n\
 Categories: pick 1-3 categories for the dish from the supplied category list (e.g. meal type, course, cuisine, whatever the list covers), copying names exactly. Keep the recipe's current categories in mind and don't repeat them. Never invent categories; use [] when none fit or no list is supplied.\n\
 \n\
+Tools: list the equipment the recipe needs when it names it or clearly requires it (e.g. air fryer, stand mixer, blender, cast iron skillet, sheet pan, baking dish, slow cooker). Skip everyday basics (knife, cutting board, bowls, spoons, measuring cups) unless the recipe asks for something specific. Copy the name from the supplied tool list when it is the same tool; otherwise use a short generic Title Case name (\"Sheet Pan\", not \"large rimmed baking sheet\"; sizes stay in the steps). Keep the recipe's current tools in mind and don't repeat them. Use [] when the recipe doesn't say.\n\
+\n\
 Set cannot_clean to a short reason only if the recipe is too incomplete to clean (for example no ingredients at all); otherwise null.\n\
 Write in the language of the recipe.";
 
@@ -59,7 +61,7 @@ pub fn plan_schema() -> Value {
         "required": [
             "cannot_clean", "name", "description", "recipe_yield", "servings", "prep_time",
             "cook_time", "total_time", "ingredients", "new_units", "instructions", "categories",
-            "notes"
+            "tools", "notes"
         ],
         "properties": {
             "cannot_clean": nullable("string"),
@@ -130,6 +132,7 @@ pub fn plan_schema() -> Value {
                 }
             },
             "categories": { "type": "array", "items": { "type": "string" } },
+            "tools": { "type": "array", "items": { "type": "string" } },
             "notes": { "type": "array", "items": { "type": "string" } }
         }
     })
@@ -172,6 +175,8 @@ pub struct Plan {
     pub instructions: Vec<PlanStep>,
     #[serde(default)]
     pub categories: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -287,6 +292,7 @@ pub fn prompt(
     lines: &[Line],
     units: &[Value],
     categories: &[Value],
+    tools: &[Value],
     extra: Option<&str>,
 ) -> String {
     let mut p = String::from("<recipe>\n");
@@ -346,22 +352,25 @@ pub fn prompt(
             None => p += &format!("{name}\n"),
         }
     }
-    p += "</units>\n<categories>\n";
-    for category in categories.iter().filter_map(|c| text(&c["name"])) {
-        p += &format!("{category}\n");
-    }
-    p += "</categories>\n";
-    let current: Vec<&str> = recipe["recipeCategory"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|c| text(&c["name"]))
-        .collect();
-    if !current.is_empty() {
-        p += &format!(
-            "<current_categories>{}</current_categories>\n",
-            current.join(", ")
-        );
+    p += "</units>\n";
+    for (tag, available, field) in [
+        ("categories", categories, "recipeCategory"),
+        ("tools", tools, "tools"),
+    ] {
+        p += &format!("<{tag}>\n");
+        for name in available.iter().filter_map(|c| text(&c["name"])) {
+            p += &format!("{name}\n");
+        }
+        p += &format!("</{tag}>\n");
+        let current: Vec<&str> = recipe[field]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| text(&c["name"]))
+            .collect();
+        if !current.is_empty() {
+            p += &format!("<current_{tag}>{}</current_{tag}>\n", current.join(", "));
+        }
     }
     if let Some(extra) = extra {
         p += &format!("<user_instructions>{extra}</user_instructions>\n");
@@ -668,6 +677,37 @@ pub fn add_categories(
     (added, unknown)
 }
 
+/// The existing Mealie tool with this name, ignoring case and a plural "s".
+pub fn find_tool<'a>(tools: &'a [Value], name: &str) -> Option<&'a Value> {
+    let k = key(name);
+    let singular = |s: &str| s.strip_suffix('s').unwrap_or(s).to_string();
+    tools.iter().find(|t| eq(&t["name"], &k)).or_else(|| {
+        tools
+            .iter()
+            .find(|t| text(&t["name"]).is_some_and(|n| singular(&key(n)) == singular(&k)))
+    })
+}
+
+/// Adds tools to the recipe, keeping the ones it already has. Returns the
+/// names added.
+pub fn add_tools(recipe: &mut Value, tools: &[Value]) -> Vec<String> {
+    let mut current: Vec<Value> = recipe["tools"].as_array().cloned().unwrap_or_default();
+    let mut added = Vec::new();
+    for tool in tools {
+        if current.iter().any(|t| t["id"] == tool["id"]) {
+            continue;
+        }
+        current.push(json!({
+            "id": tool["id"],
+            "name": tool["name"],
+            "slug": tool["slug"],
+        }));
+        added.push(text(&tool["name"]).unwrap_or_default().to_string());
+    }
+    recipe["tools"] = Value::Array(current);
+    added
+}
+
 /// Problems in a saved recipe that mean the cleanup didn't take.
 pub fn verify(recipe: &Value, units: &[Value]) -> Vec<String> {
     let mut problems = Vec::new();
@@ -748,8 +788,17 @@ mod tests {
         let lines = original_lines(&recipe);
         assert_eq!(lines[1].text, "Salt and pepper, to taste");
         let categories = vec![json!({"id": "c1", "name": "Dinner", "slug": "dinner"})];
-        let prompt = prompt(&recipe, &lines, &usable_units(units()), &categories, None);
+        let tools = vec![json!({"id": "t1", "name": "Skillet", "slug": "skillet"})];
+        let prompt = prompt(
+            &recipe,
+            &lines,
+            &usable_units(units()),
+            &categories,
+            &tools,
+            None,
+        );
         assert!(prompt.contains("<categories>\nDinner\n</categories>"));
+        assert!(prompt.contains("<tools>\nSkillet\n</tools>"));
         assert!(prompt.contains("1: Salt and pepper, to taste"));
         assert!(prompt.contains("tablespoon (tablespoons)"));
         assert!(!prompt.contains("\ntbsp\n"));
@@ -845,7 +894,7 @@ mod tests {
             ],
         });
         let lines = original_lines(&recipe);
-        let prompt = prompt(&recipe, &lines, &[], &[], None);
+        let prompt = prompt(&recipe, &lines, &[], &[], &[], None);
         assert!(prompt.contains("1: 2 tbsp butter (substitutes: olive oil; ghee works too)"));
 
         let plan: Plan = serde_json::from_value(json!({
@@ -930,6 +979,28 @@ mod tests {
             json!([
                 {"id": "c1", "name": "Dinner", "slug": "dinner"},
                 {"id": "c2", "name": "Italian", "slug": "italian"},
+            ])
+        );
+    }
+
+    #[test]
+    fn matches_and_adds_tools() {
+        let available = vec![
+            json!({"id": "t1", "name": "Air Fryer", "slug": "air-fryer", "householdsWithTool": []}),
+            json!({"id": "t2", "name": "Sheet Pans", "slug": "sheet-pans"}),
+        ];
+        assert_eq!(find_tool(&available, "air fryer").unwrap()["id"], "t1");
+        assert_eq!(find_tool(&available, "Sheet Pan").unwrap()["id"], "t2");
+        assert!(find_tool(&available, "Blender").is_none());
+
+        let mut recipe = json!({"tools": [{"id": "t1", "name": "Air Fryer", "slug": "air-fryer"}]});
+        let added = add_tools(&mut recipe, &available);
+        assert_eq!(added, ["Sheet Pans"]);
+        assert_eq!(
+            recipe["tools"],
+            json!([
+                {"id": "t1", "name": "Air Fryer", "slug": "air-fryer"},
+                {"id": "t2", "name": "Sheet Pans", "slug": "sheet-pans"},
             ])
         );
     }

@@ -86,6 +86,12 @@ in
       description = "Tag added to recipes once they have been cleaned.";
     };
 
+    sourceTags = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Tag imported recipes with where they came from (TikTok, Instagram, Website, Upload, ...).";
+    };
+
     environmentFile = mkOption {
       type = types.path;
       description = "File with OPENAI_API_KEY and MEALIE_API_KEY (and optionally AUTH_PASSWORD, COOKIES_FILE, EXTRA_PROMPT).";
@@ -120,6 +126,7 @@ in
         MEALIE_GROUP_NAME = cfg.mealieGroup;
         CLEANUP = lib.boolToString cfg.cleanup;
         CLEAN_TAG = cfg.cleanTag;
+        SOURCE_TAGS = lib.boolToString cfg.sourceTags;
       }
       // lib.optionalAttrs (cfg.mealiePublicUrl != null) { MEALIE_PUBLIC_URL = cfg.mealiePublicUrl; }
       // cfg.settings;
