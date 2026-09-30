@@ -58,6 +58,9 @@ After any of these paths, a **Clean** stage tidies the recipe in Mealie:
 - Hashtag tags are removed and unused hashtag tags are deleted. Last of all, the
   recipe gets the `Imported Clean` tag.
 
+Imports only add the tags you give the job. A website's SEO keywords and the
+model's keywords aren't turned into tags, since categories cover the same ground.
+
 Anything the model thinks needs a human look shows up as a warning in the job log.
 If the cleanup fails, the recipe stays in Mealie without the tag. Retrying the job
 then re-runs only the cleanup, not the import. Retrying a job that already
