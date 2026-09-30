@@ -17,6 +17,7 @@ use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 
 use crate::{
     db,
+    mealie::Mealie,
     state::{AppState, Update},
     uploads, urls,
 };
@@ -63,6 +64,11 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/api/jobs/{id}", get(detail).delete(remove))
         .route("/api/jobs/{id}/retry", post(retry))
         .route("/api/jobs/{id}/cancel", post(cancel))
+        .route("/api/clean", post(clean_one))
+        .route(
+            "/api/clean/library",
+            get(library_status).post(clean_library),
+        )
         .route("/api/token", get(token))
         .route("/api/token/rotate", post(rotate_token))
         .layer(middleware::from_fn_with_state(state, bearer_auth))
@@ -178,6 +184,10 @@ async fn created(state: &AppState, id: i64) -> ApiResult<(StatusCode, Json<db::J
 async fn enqueue_url(state: &AppState, req: CreateJob) -> ApiResult<(StatusCode, Json<db::Job>)> {
     let url = urls::extract(&req.url)
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "that doesn't look like a link"))?;
+    // A link to a recipe already in this Mealie means "clean it", not "import it".
+    if let Some(slug) = state.config.mealie_slug_from_url(&url) {
+        return enqueue_clean(state, &slug).await;
+    }
     let source = match req.source.as_deref().unwrap_or("auto") {
         "auto" if urls::is_social(&url) => "social",
         "auto" => "web",
@@ -201,6 +211,152 @@ async fn enqueue_url(state: &AppState, req: CreateJob) -> ApiResult<(StatusCode,
     let note = req.note.as_deref().map(str::trim).filter(|n| !n.is_empty());
     let id = db::insert_job(&state.db, &url, source, &tags, note).await?;
     created(state, id).await
+}
+
+fn mealie(state: &AppState) -> Mealie<'_> {
+    Mealie {
+        http: &state.http,
+        config: &state.config,
+    }
+}
+
+fn require_cleanup(state: &AppState) -> Result<(), ApiError> {
+    if state.config.cleanup {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "cleanup is turned off (CLEANUP=false)",
+        ))
+    }
+}
+
+fn has_clean_tag(recipe: &serde_json::Value, tag: &str) -> bool {
+    recipe["tags"].as_array().is_some_and(|t| {
+        t.iter().any(|t| {
+            t["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(tag))
+        })
+    })
+}
+
+async fn insert_clean(state: &AppState, recipe: &serde_json::Value) -> anyhow::Result<Option<i64>> {
+    let Some(slug) = recipe["slug"].as_str() else {
+        return Ok(None);
+    };
+    let link = state.config.mealie_recipe_link(slug);
+    let thumbnail = recipe["id"]
+        .as_str()
+        .map(|id| state.config.mealie_image_link(id));
+    let id = db::insert_clean_job(
+        &state.db,
+        &db::CleanJob {
+            slug,
+            link: &link,
+            name: recipe["name"].as_str(),
+            thumbnail: thumbnail.as_deref(),
+        },
+    )
+    .await?;
+    Ok(Some(id))
+}
+
+/// Queues a clean-only job for one recipe already in Mealie.
+async fn enqueue_clean(state: &AppState, slug: &str) -> ApiResult<(StatusCode, Json<db::Job>)> {
+    require_cleanup(state)?;
+    if db::pending_clean_slugs(&state.db)
+        .await?
+        .iter()
+        .any(|s| s == slug)
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "that recipe is already queued for cleaning",
+        ));
+    }
+    let recipe = mealie(state).recipe(slug).await?.ok_or_else(|| {
+        ApiError::new(StatusCode::NOT_FOUND, format!("no recipe {slug} in Mealie"))
+    })?;
+    let id = insert_clean(state, &recipe).await?.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "Mealie returned a recipe without a slug",
+        )
+    })?;
+    created(state, id).await
+}
+
+#[derive(Deserialize)]
+struct CleanRequest {
+    slug: Option<String>,
+    url: Option<String>,
+}
+
+async fn clean_one(
+    State(state): State<AppState>,
+    Json(req): Json<CleanRequest>,
+) -> ApiResult<(StatusCode, Json<db::Job>)> {
+    let slug = req
+        .slug
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            req.url
+                .as_deref()
+                .and_then(|u| state.config.mealie_slug_from_url(u.trim()))
+        })
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "send a recipe slug or a link to it in Mealie",
+            )
+        })?;
+    enqueue_clean(&state, &slug).await
+}
+
+/// Recipes in Mealie without the clean tag that aren't already queued.
+async fn uncleaned(state: &AppState) -> ApiResult<(usize, Vec<serde_json::Value>)> {
+    let recipes = mealie(state).recipes().await?;
+    let pending = db::pending_clean_slugs(&state.db).await?;
+    let total = recipes.len();
+    let todo = recipes
+        .into_iter()
+        .filter(|r| !has_clean_tag(r, &state.config.clean_tag))
+        .filter(|r| {
+            r["slug"]
+                .as_str()
+                .is_some_and(|s| !pending.iter().any(|p| p == s))
+        })
+        .collect();
+    Ok((total, todo))
+}
+
+async fn library_status(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    require_cleanup(&state)?;
+    let (total, todo) = uncleaned(&state).await?;
+    let queued = db::pending_clean_slugs(&state.db).await?.len();
+    Ok(Json(json!({
+        "total": total,
+        "uncleaned": todo.len(),
+        "queued": queued,
+        "tag": state.config.clean_tag,
+    })))
+}
+
+async fn clean_library(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    require_cleanup(&state)?;
+    let (_, todo) = uncleaned(&state).await?;
+    let mut queued = 0;
+    for recipe in &todo {
+        if insert_clean(&state, recipe).await?.is_some() {
+            queued += 1;
+        }
+    }
+    tracing::info!("queued {queued} Mealie recipes for cleaning");
+    state.wake.notify_waiters();
+    let _ = state.updates.send(Update::Refresh);
+    Ok(Json(json!({ "queued": queued })))
 }
 
 /// One field of an upload request, whatever format it arrived in.

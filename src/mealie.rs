@@ -220,6 +220,12 @@ impl Mealie<'_> {
         Ok(page["items"].as_array().cloned().unwrap_or_default())
     }
 
+    /// Every recipe in the group (summaries, which include tags).
+    pub async fn recipes(&self) -> Result<Vec<Value>> {
+        self.items("/api/recipes", &[("perPage", "-1"), ("orderBy", "name")])
+            .await
+    }
+
     pub async fn units(&self) -> Result<Vec<Value>> {
         self.items("/api/units", &[("perPage", "-1")]).await
     }

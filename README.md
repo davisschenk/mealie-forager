@@ -58,6 +58,13 @@ After any of these paths, a **Clean** stage tidies the recipe in Mealie:
 - Hashtag tags are removed and unused hashtag tags are deleted. Last of all, the
   recipe gets the `Imported Clean` tag.
 
+**Recipes already in Mealie** can be cleaned too. Paste a Mealie recipe link into
+the import box, or send it through the API or Shortcut, and Forager queues a
+clean-only job instead of importing it again. The "Mealie library" panel counts
+the recipes without the clean tag, and one button queues a clean for all of
+them. The API equivalents are `POST /api/clean` (`{"slug": …}` or `{"url": …}`)
+and `GET`/`POST /api/clean/library`. Clean-only jobs wait behind new imports.
+
 Imports only add the tags you give the job. A website's SEO keywords and the
 model's keywords aren't turned into tags, since categories cover the same ground.
 
