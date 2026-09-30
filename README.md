@@ -40,6 +40,9 @@ After either path, a **Clean** stage tidies the recipe in Mealie:
 - Steps are made imperative, one action each, and linked to their ingredients.
   Creator chatter is removed.
 - The name, description, yield, servings, and times are tidied.
+- The recipe is given one to three of your existing Mealie categories (meal type,
+  course, cuisine, whatever your list covers). Categories are never created, and
+  ones the recipe already has are kept.
 - Hashtag tags are removed and unused hashtag tags are deleted. Last of all, the
   recipe gets the `Imported Clean` tag.
 

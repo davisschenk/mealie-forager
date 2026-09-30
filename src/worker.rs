@@ -498,6 +498,7 @@ async fn clean_recipe(
         bail!("the recipe has no ingredients to clean, so it was left untagged");
     }
     let units = clean::usable_units(mealie.units().await?);
+    let categories = mealie.categories().await?;
     ctx.info(format!(
         "Cleaning {} ingredient lines with {}",
         lines.len(),
@@ -522,6 +523,7 @@ async fn clean_recipe(
                 &recipe,
                 &lines,
                 &units,
+                &categories,
                 Some(extra.as_str()).filter(|e| !e.is_empty())
             )),
             "recipe_cleanup",
@@ -558,6 +560,22 @@ async fn clean_recipe(
         ctx.warn(format!("Needs a human look: {note}")).await;
     }
     clean::apply(&mut recipe, &plan, built);
+    let (added, unknown) = clean::add_categories(&mut recipe, &plan, &categories);
+    if !added.is_empty() {
+        ctx.info(format!("Categorized as {}", added.join(", ")))
+            .await;
+    }
+    if !unknown.is_empty() {
+        ctx.warn(format!(
+            "Skipped categories that don't exist in Mealie: {}",
+            unknown.join(", ")
+        ))
+        .await;
+    }
+    if categories.is_empty() {
+        ctx.warn("Mealie has no categories yet, so the recipe wasn't categorized")
+            .await;
+    }
     let saved = mealie.update_recipe(slug, &recipe).await?;
     let slug = saved["slug"].as_str().unwrap_or(slug).to_string();
     db::set_slug(&state.db, ctx.id, &slug).await?;

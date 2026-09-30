@@ -175,6 +175,11 @@ impl Mealie<'_> {
         self.items("/api/units", &[("perPage", "-1")]).await
     }
 
+    pub async fn categories(&self) -> Result<Vec<Value>> {
+        self.items("/api/organizers/categories", &[("perPage", "-1")])
+            .await
+    }
+
     pub async fn search_foods(&self, search: &str) -> Result<Vec<Value>> {
         self.items("/api/foods", &[("search", search), ("perPage", "15")])
             .await

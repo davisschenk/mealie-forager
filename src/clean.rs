@@ -37,6 +37,8 @@ Metadata:\n\
 - description is 1-2 sentences, neutral third person: what the dish is and what makes it notable. No hashtags, @mentions, emojis, \"recipe on my blog\" or filler.\n\
 - recipe_yield (e.g. \"12 sliders\", \"4 servings\"), servings (a number) and prep_time, cook_time, total_time (human readable, e.g. \"15 minutes\", \"1 hour 10 minutes\") only when the source states them or they are clear from the recipe; otherwise null. Do not guess wildly.\n\
 \n\
+Categories: pick 1-3 categories for the dish from the supplied category list (e.g. meal type, course, cuisine, whatever the list covers), copying names exactly. Keep the recipe's current categories in mind and don't repeat them. Never invent categories; use [] when none fit or no list is supplied.\n\
+\n\
 Set cannot_clean to a short reason only if the recipe is too incomplete to clean (for example no ingredients at all); otherwise null.\n\
 Write in the language of the recipe.";
 
@@ -56,7 +58,8 @@ pub fn plan_schema() -> Value {
         "additionalProperties": false,
         "required": [
             "cannot_clean", "name", "description", "recipe_yield", "servings", "prep_time",
-            "cook_time", "total_time", "ingredients", "new_units", "instructions", "notes"
+            "cook_time", "total_time", "ingredients", "new_units", "instructions", "categories",
+            "notes"
         ],
         "properties": {
             "cannot_clean": nullable("string"),
@@ -126,6 +129,7 @@ pub fn plan_schema() -> Value {
                     }
                 }
             },
+            "categories": { "type": "array", "items": { "type": "string" } },
             "notes": { "type": "array", "items": { "type": "string" } }
         }
     })
@@ -166,6 +170,8 @@ pub struct Plan {
     pub ingredients: Vec<PlanIngredient>,
     pub new_units: Vec<NewUnit>,
     pub instructions: Vec<PlanStep>,
+    #[serde(default)]
+    pub categories: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -276,7 +282,13 @@ fn text_owned(v: &Value) -> Option<String> {
     text(v).map(str::to_string)
 }
 
-pub fn prompt(recipe: &Value, lines: &[Line], units: &[Value], extra: Option<&str>) -> String {
+pub fn prompt(
+    recipe: &Value,
+    lines: &[Line],
+    units: &[Value],
+    categories: &[Value],
+    extra: Option<&str>,
+) -> String {
     let mut p = String::from("<recipe>\n");
     for (tag, field) in [
         ("name", "name"),
@@ -334,7 +346,23 @@ pub fn prompt(recipe: &Value, lines: &[Line], units: &[Value], extra: Option<&st
             None => p += &format!("{name}\n"),
         }
     }
-    p += "</units>\n";
+    p += "</units>\n<categories>\n";
+    for category in categories.iter().filter_map(|c| text(&c["name"])) {
+        p += &format!("{category}\n");
+    }
+    p += "</categories>\n";
+    let current: Vec<&str> = recipe["recipeCategory"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| text(&c["name"]))
+        .collect();
+    if !current.is_empty() {
+        p += &format!(
+            "<current_categories>{}</current_categories>\n",
+            current.join(", ")
+        );
+    }
     if let Some(extra) = extra {
         p += &format!("<user_instructions>{extra}</user_instructions>\n");
     }
@@ -603,6 +631,43 @@ pub fn apply(recipe: &mut Value, plan: &Plan, built: Built) {
     }
 }
 
+/// Adds the plan's categories (matched by name against Mealie's existing ones)
+/// to the recipe, keeping the ones it already has. Returns the names added and
+/// the names that matched no existing category.
+pub fn add_categories(
+    recipe: &mut Value,
+    plan: &Plan,
+    available: &[Value],
+) -> (Vec<String>, Vec<String>) {
+    let mut current: Vec<Value> = recipe["recipeCategory"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let (mut added, mut unknown) = (Vec::new(), Vec::new());
+    for name in plan
+        .categories
+        .iter()
+        .map(|n| n.trim())
+        .filter(|n| !n.is_empty())
+    {
+        let Some(category) = available.iter().find(|c| eq(&c["name"], name)) else {
+            unknown.push(name.to_string());
+            continue;
+        };
+        if current.iter().any(|c| c["id"] == category["id"]) {
+            continue;
+        }
+        current.push(json!({
+            "id": category["id"],
+            "name": category["name"],
+            "slug": category["slug"],
+        }));
+        added.push(text(&category["name"]).unwrap_or(name).to_string());
+    }
+    recipe["recipeCategory"] = Value::Array(current);
+    (added, unknown)
+}
+
 /// Problems in a saved recipe that mean the cleanup didn't take.
 pub fn verify(recipe: &Value, units: &[Value]) -> Vec<String> {
     let mut problems = Vec::new();
@@ -682,7 +747,9 @@ mod tests {
         });
         let lines = original_lines(&recipe);
         assert_eq!(lines[1].text, "Salt and pepper, to taste");
-        let prompt = prompt(&recipe, &lines, &usable_units(units()), None);
+        let categories = vec![json!({"id": "c1", "name": "Dinner", "slug": "dinner"})];
+        let prompt = prompt(&recipe, &lines, &usable_units(units()), &categories, None);
+        assert!(prompt.contains("<categories>\nDinner\n</categories>"));
         assert!(prompt.contains("1: Salt and pepper, to taste"));
         assert!(prompt.contains("tablespoon (tablespoons)"));
         assert!(!prompt.contains("\ntbsp\n"));
@@ -778,7 +845,7 @@ mod tests {
             ],
         });
         let lines = original_lines(&recipe);
-        let prompt = prompt(&recipe, &lines, &[], None);
+        let prompt = prompt(&recipe, &lines, &[], &[], None);
         assert!(prompt.contains("1: 2 tbsp butter (substitutes: olive oil; ghee works too)"));
 
         let plan: Plan = serde_json::from_value(json!({
@@ -837,6 +904,32 @@ mod tests {
             json!([
                 {"substituteFoodId": "f-oil", "note": null},
                 {"substituteFoodId": null, "note": "ghee works too"},
+            ])
+        );
+    }
+
+    #[test]
+    fn adds_only_existing_categories() {
+        let available = vec![
+            json!({"id": "c1", "name": "Dinner", "slug": "dinner", "recipeCount": 4}),
+            json!({"id": "c2", "name": "Italian", "slug": "italian"}),
+        ];
+        let mut recipe =
+            json!({"recipeCategory": [{"id": "c1", "name": "Dinner", "slug": "dinner"}]});
+        let plan: Plan = serde_json::from_value(json!({
+            "cannot_clean": null, "name": "x", "description": "", "recipe_yield": null, "servings": null,
+            "prep_time": null, "cook_time": null, "total_time": null, "ingredients": [], "new_units": [],
+            "instructions": [], "categories": ["dinner", "italian", "Pasta Night"], "notes": [],
+        }))
+        .unwrap();
+        let (added, unknown) = add_categories(&mut recipe, &plan, &available);
+        assert_eq!(added, ["Italian"]);
+        assert_eq!(unknown, ["Pasta Night"]);
+        assert_eq!(
+            recipe["recipeCategory"],
+            json!([
+                {"id": "c1", "name": "Dinner", "slug": "dinner"},
+                {"id": "c2", "name": "Italian", "slug": "italian"},
             ])
         );
     }
