@@ -33,6 +33,10 @@ After either path, a **Clean** stage tidies the recipe in Mealie:
   only when nothing fits. Units come from Mealie's list, and duplicates named after
   another unit's abbreviation (such as a `tbsp` unit next to `tablespoon`) are
   never used.
+- Alternatives ("chicken broth or vegetable broth") become Mealie ingredient
+  substitutions, linked to a food when they name one. Substitutions already on a
+  line are kept. Substitutions the food already has at the food level aren't
+  repeated on the recipe. Food and unit aliases count as exact matches.
 - Steps are made imperative, one action each, and linked to their ingredients.
   Creator chatter is removed.
 - The name, description, yield, servings, and times are tidied.
