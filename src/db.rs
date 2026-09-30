@@ -239,12 +239,49 @@ pub async fn claim_next(db: &SqlitePool) -> Result<Option<Job>> {
         "UPDATE jobs SET status = 'running', stage = 'queued', progress = NULL, \
          attempts = attempts + 1, error = NULL, error_stage = NULL, started_at = ?, \
          finished_at = NULL, updated_at = ? \
-         WHERE id = (SELECT id FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1) \
+         WHERE id = (SELECT id FROM jobs WHERE status = 'queued' \
+           ORDER BY source = 'mealie', id LIMIT 1) \
          RETURNING *",
     )
     .bind(now)
     .bind(now)
     .fetch_optional(db)
+    .await?)
+}
+
+/// Clean-only jobs start in front of the Clean stage and are claimed after imports.
+pub struct CleanJob<'a> {
+    pub slug: &'a str,
+    pub link: &'a str,
+    pub name: Option<&'a str>,
+    pub thumbnail: Option<&'a str>,
+}
+
+pub async fn insert_clean_job(db: &SqlitePool, job: &CleanJob<'_>) -> Result<i64> {
+    let mut tx = db.begin().await?;
+    let id = insert_job(&mut *tx, job.link, "mealie", &[], None).await?;
+    sqlx::query(
+        "UPDATE jobs SET mealie_slug = ?, title = ?, recipe_name = ?, thumbnail = ?, \
+         platform = 'Mealie', media_kind = 'mealie' WHERE id = ?",
+    )
+    .bind(job.slug)
+    .bind(job.name)
+    .bind(job.name)
+    .bind(job.thumbnail)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Slugs that already have a clean job waiting or running.
+pub async fn pending_clean_slugs(db: &SqlitePool) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT mealie_slug FROM jobs WHERE source = 'mealie' AND mealie_slug IS NOT NULL \
+         AND status IN ('queued', 'running')",
+    )
+    .fetch_all(db)
     .await?)
 }
 
@@ -462,12 +499,13 @@ pub async fn cancel_queued(db: &SqlitePool, id: i64) -> Result<bool> {
 pub async fn requeue(db: &SqlitePool, id: i64, fresh: bool) -> Result<bool> {
     // Uploads keep what describes the files themselves (set when they arrived).
     let reset = if fresh {
-        ", title = CASE WHEN source = 'file' THEN title END, \
-         platform = CASE WHEN source = 'file' THEN platform END, \
-         media_kind = CASE WHEN source = 'file' THEN media_kind END, \
+        ", title = CASE WHEN source IN ('file', 'mealie') THEN title END, \
+         platform = CASE WHEN source IN ('file', 'mealie') THEN platform END, \
+         media_kind = CASE WHEN source IN ('file', 'mealie') THEN media_kind END, \
          uploader = NULL, thumbnail = NULL, \
          duration_secs = NULL, description = NULL, images = NULL, \
-         transcript = NULL, recipe_json = NULL, recipe_name = NULL, mealie_slug = NULL"
+         transcript = NULL, recipe_json = NULL, recipe_name = NULL, \
+         mealie_slug = CASE WHEN source = 'mealie' THEN mealie_slug END"
     } else {
         ""
     };
@@ -751,6 +789,49 @@ mod tests {
         assert_eq!(upload.title.as_deref(), Some("t"));
         let web = get_full(&db, web).await.unwrap().unwrap();
         assert!(web.media_kind.is_none() && web.title.is_none());
+    }
+
+    #[tokio::test]
+    async fn clean_jobs_queue_behind_imports() {
+        let db = connect_memory().await.unwrap();
+        let clean = insert_clean_job(
+            &db,
+            &CleanJob {
+                slug: "soup",
+                link: "https://m/g/home/r/soup",
+                name: Some("Soup"),
+                thumbnail: None,
+            },
+        )
+        .await
+        .unwrap();
+        let import = insert_job(&db, "https://a", "web", &[], None)
+            .await
+            .unwrap();
+        assert_eq!(pending_clean_slugs(&db).await.unwrap(), ["soup"]);
+        assert_eq!(claim_next(&db).await.unwrap().unwrap().id, import);
+        let job = claim_next(&db).await.unwrap().unwrap();
+        assert_eq!(job.id, clean);
+        assert_eq!(job.mealie_slug.as_deref(), Some("soup"));
+
+        finish(
+            &db,
+            clean,
+            Status::Failed,
+            Stage::Clean,
+            Some(("clean", "x")),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(requeue(&db, clean, true).await.unwrap());
+        let job = get_full(&db, clean).await.unwrap().unwrap();
+        assert_eq!(
+            job.mealie_slug.as_deref(),
+            Some("soup"),
+            "fresh retry keeps the target"
+        );
+        assert_eq!(job.media_kind.as_deref(), Some("mealie"));
     }
 
     #[tokio::test]

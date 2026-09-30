@@ -120,10 +120,81 @@ impl Config {
         )
     }
 
+    /// The recipe slug if `url` is a recipe page on this Mealie
+    /// (`/g/<group>/r/<slug>`, or `/recipe/<slug>` on older versions).
+    pub fn mealie_slug_from_url(&self, url: &str) -> Option<String> {
+        let parsed = url::Url::parse(url).ok()?;
+        let ours = [&self.mealie_public_url, &self.mealie_url]
+            .iter()
+            .filter_map(|u| url::Url::parse(u).ok())
+            .any(|u| u.host_str() == parsed.host_str() && u.port() == parsed.port());
+        if !ours {
+            return None;
+        }
+        let segments: Vec<&str> = parsed.path_segments()?.filter(|s| !s.is_empty()).collect();
+        let at = segments.iter().position(|s| *s == "r" || *s == "recipe")?;
+        segments.get(at + 1).map(|s| s.to_string())
+    }
+
     pub fn mealie_recipe_link(&self, slug: &str) -> String {
         format!(
             "{}/g/{}/r/{}",
             self.mealie_public_url, self.mealie_group, slug
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Config {
+        Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            database_path: "x.db".into(),
+            upload_dir: "uploads".into(),
+            max_upload_bytes: 1,
+            work_dir: ".".into(),
+            workers: 1,
+            max_duration_secs: 1.0,
+            openai_url: String::new(),
+            openai_api_key: String::new(),
+            transcription_model: String::new(),
+            text_model: String::new(),
+            extra_prompt: None,
+            cleanup: true,
+            clean_model: String::new(),
+            clean_tag: String::new(),
+            mealie_url: "http://127.0.0.1:9925".into(),
+            mealie_public_url: "https://mealie.example.com".into(),
+            mealie_api_key: String::new(),
+            mealie_group: "home".into(),
+            ytdlp: String::new(),
+            ffmpeg: String::new(),
+            gallery_dl: String::new(),
+            cookies_file: None,
+        }
+    }
+
+    #[test]
+    fn recognises_mealie_recipe_links() {
+        let c = config();
+        assert_eq!(
+            c.mealie_slug_from_url("https://mealie.example.com/g/home/r/garlic-noodles?x=1"),
+            Some("garlic-noodles".into())
+        );
+        assert_eq!(
+            c.mealie_slug_from_url("https://mealie.example.com/recipe/soup"),
+            Some("soup".into())
+        );
+        assert_eq!(
+            c.mealie_slug_from_url("http://127.0.0.1:9925/g/home/r/pie"),
+            Some("pie".into())
+        );
+        assert_eq!(
+            c.mealie_slug_from_url("https://mealie.example.com/g/home"),
+            None
+        );
+        assert_eq!(c.mealie_slug_from_url("https://other.com/g/home/r/x"), None);
     }
 }

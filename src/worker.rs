@@ -163,6 +163,9 @@ async fn pipeline(ctx: &Ctx<'_>) -> Result<String> {
             .await;
             Some(slug.clone())
         }
+        Some(slug) if job.source == "mealie" => {
+            bail!("recipe {slug} is no longer in Mealie");
+        }
         Some(slug) => {
             ctx.warn(format!(
                 "Recipe {slug} is no longer in Mealie; importing again"
@@ -178,6 +181,9 @@ async fn pipeline(ctx: &Ctx<'_>) -> Result<String> {
     };
     if !state.config.cleanup {
         return Ok(slug);
+    }
+    if job.source == "mealie" {
+        ctx.info("Cleaning a recipe already in Mealie").await;
     }
     clean_recipe(ctx, &mealie, &slug, job.note.as_deref()).await
 }

@@ -16,7 +16,7 @@ const STATUS_LABEL = {
   failed: "Failed",
   cancelled: "Cancelled",
 };
-const SOURCE_LABEL = { social: "Social post", web: "Recipe website", file: "Upload" };
+const SOURCE_LABEL = { social: "Social post", web: "Recipe website", file: "Upload", mealie: "Mealie recipe" };
 const UPLOAD_EMOJI = { images: "🖼️", text: "📝", zip: "📦", video: "🎬" };
 const UPLOAD_KIND = { images: "Photos (Mealie AI import)", text: "Text (Mealie AI import)", zip: "Mealie export", video: "Video / audio" };
 const PLATFORM_EMOJI = { TikTok: "🎵", Instagram: "📸", YouTube: "▶️", Facebook: "📘", Pinterest: "📌" };
@@ -85,7 +85,7 @@ const cssUrl = (u) => u.replace(/["'()\\\s]/g, (c) => `%${c.charCodeAt(0).toStri
 function thumb(j) {
   const src = /^https?:\/\//.test(j.thumbnail || "") ? j.thumbnail : null;
   const style = src ? ` style="background-image:url('${esc(cssUrl(src))}')"` : "";
-  const emoji = src ? "" : (j.source === "file" && UPLOAD_EMOJI[j.media_kind]) || PLATFORM_EMOJI[j.platform] || "🍽️";
+  const emoji = src ? "" : (j.source === "mealie" && "🧹") || (j.source === "file" && UPLOAD_EMOJI[j.media_kind]) || PLATFORM_EMOJI[j.platform] || "🍽️";
   return `<div class="thumb"${style}>${emoji}</div>`;
 }
 
@@ -95,7 +95,8 @@ function thumb(j) {
 const isWeb = (j) => j.source === "web" && (!j.media_kind || j.media_kind === "web") && !POST_STAGES.has(j.stage) && !POST_STAGES.has(j.error_stage);
 
 function stagesFor(j) {
-  const upload = j.source === "file" ? (j.media_kind === "video" ? ["transcribe", "extract", "import", "clean"] : ["import", "clean"]) : null;
+  const upload =
+    j.source === "mealie" ? ["clean"] : j.source === "file" ? (j.media_kind === "video" ? ["transcribe", "extract", "import", "clean"] : ["import", "clean"]) : null;
   return STAGES.filter(([key]) => (key !== "clean" || state.config.cleanup) && (upload ? upload.includes(key) : !(isWeb(j) && POST_STAGES.has(key))));
 }
 
@@ -276,6 +277,7 @@ function logLine(e) {
 }
 
 function recipeView(r, j) {
+  if (!r && j.source === "mealie") return `<p class="muted">This recipe was already in Mealie and is cleaned in place${j.mealie_slug ? " — open it in Mealie to see it" : ""}.</p>`;
   if (!r && j.source === "file" && j.media_kind !== "video") return `<p class="muted">Mealie imported the upload itself${j.mealie_slug ? " — open it in Mealie to see the recipe" : ""}.</p>`;
   if (!r && isWeb(j)) return `<p class="muted">Mealie scraped this page directly${j.mealie_slug ? " — open it in Mealie to see the recipe" : ""}.</p>`;
   if (!r) return `<p class="muted">The recipe appears here once the extract stage finishes.</p>`;
@@ -577,7 +579,8 @@ function connect() {
       if (!prev || prev.status !== u.job.status) {
         scheduleStats();
         if (prev && u.job.status === "succeeded") {
-          toast(`Imported “${jobTitle(u.job)}”`, { href: { url: mealieLink(u.job.mealie_slug), label: "Open" } });
+          toast(`${u.job.source === "mealie" ? "Cleaned" : "Imported"} “${jobTitle(u.job)}”`, { href: { url: mealieLink(u.job.mealie_slug), label: "Open" } });
+          scheduleLibrary();
         } else if (prev && u.job.status === "failed") {
           toast(`Failed: ${jobTitle(u.job)}`, { kind: "bad", action: { label: "Details", run: () => openDrawer(u.job.id) } });
         }
@@ -671,6 +674,52 @@ $("#submit").addEventListener("drop", (e) => {
   if (!e.dataTransfer.files.length) return;
   e.preventDefault();
   addFiles([...e.dataTransfer.files]);
+});
+
+// ── Mealie library ─────────────────────────────────────────────
+
+let libraryTodo = 0;
+
+async function loadLibrary() {
+  if (!state.config.cleanup) return;
+  $("#library").hidden = false;
+  try {
+    const s = await api("/api/clean/library");
+    libraryTodo = s.uncleaned;
+    const done = s.total - s.uncleaned - s.queued;
+    const parts = [`${done} of ${s.total} recipes have “${esc(s.tag)}”.`];
+    if (s.queued) parts.push(`${s.queued} queued for cleaning.`);
+    if (s.uncleaned) parts.push(`${s.uncleaned} still need it.`);
+    $("#library-status").innerHTML = parts.join(" ");
+    $("#library-clean").hidden = !s.uncleaned;
+    $("#library-clean").textContent = `Clean ${s.uncleaned} recipe${s.uncleaned === 1 ? "" : "s"}`;
+  } catch (e) {
+    $("#library-status").textContent = `Couldn't read the library: ${e.message}`;
+  }
+}
+
+let libraryTimer = null;
+function scheduleLibrary() {
+  clearTimeout(libraryTimer);
+  libraryTimer = setTimeout(loadLibrary, 1500);
+}
+
+$("#library-clean").addEventListener("click", async () => {
+  const n = libraryTodo;
+  if (!confirm(`Clean ${n} recipe${n === 1 ? "" : "s"}? Each one uses a couple of AI calls and rewrites the recipe's ingredients, steps and categories in Mealie. New imports still go first.`)) return;
+  const btn = $("#library-clean");
+  btn.disabled = true;
+  try {
+    const { queued } = await api("/api/clean/library", { method: "POST" });
+    toast(`Queued ${queued} recipe${queued === 1 ? "" : "s"} for cleaning`);
+    if (state.filter !== "all" && state.filter !== "active") setFilter("active");
+    await loadJobs();
+    loadLibrary();
+  } catch (e) {
+    toast(e.message, { kind: "bad" });
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 // ── iOS Shortcut ───────────────────────────────────────────────
@@ -824,6 +873,7 @@ async function init() {
 
   await loadJobs().catch(() => toast("Could not load the queue", { kind: "bad" }));
   loadStats();
+  loadLibrary();
   connect();
 
   const m = location.hash.match(/^#job-(\d+)$/);

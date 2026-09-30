@@ -1279,3 +1279,7 @@ textarea:focus {
   display: grid;
   gap: 4px;
 }
+
+.library p {
+  margin: 8px 0;
+}
