@@ -5,14 +5,11 @@ use std::time::Duration;
 use crate::config::Config;
 
 /// Turns the model's output into the schema.org JSON-LD Mealie's scraper ingests.
+/// Only the job's own tags become keywords (and so Mealie tags); the model's
+/// keywords would clutter the tag list, and categories cover what they describe.
 pub fn to_json_ld(recipe: &Value, url: &str, image: Option<&str>, tags: &[String]) -> Value {
     let mut keywords: Vec<String> = Vec::new();
-    let supplied = recipe["keywords"].as_array().into_iter().flatten();
-    for k in supplied
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .chain(tags.iter().cloned())
-    {
+    for k in tags {
         let k = k.trim().to_string();
         if !k.is_empty() && !keywords.iter().any(|e| e.eq_ignore_ascii_case(&k)) {
             keywords.push(k);
@@ -143,12 +140,13 @@ impl Mealie<'_> {
         .await
     }
 
-    /// Lets Mealie's own scraper import a recipe web page.
+    /// Lets Mealie's own scraper import a recipe web page. Sites' SEO keywords
+    /// aren't imported as tags; the job's tags are added afterwards.
     pub async fn create_from_url(&self, url: &str) -> Result<String> {
         self.slug(
             self.http
                 .post(self.url("/api/recipes/create/url"))
-                .json(&json!({ "url": url, "includeTags": true }))
+                .json(&json!({ "url": url, "includeTags": false }))
                 .timeout(Duration::from_secs(180)),
         )
         .await
@@ -367,7 +365,7 @@ mod tests {
         assert!(ld.get("prepTime").is_none());
         assert!(ld.get("totalTime").is_none());
         assert!(ld.get("is_recipe").is_none());
-        assert_eq!(ld["keywords"], "noodles, Quick, weeknight");
+        assert_eq!(ld["keywords"], "quick, weeknight", "only the job's tags");
         assert_eq!(ld["recipeInstructions"][1]["@type"], "HowToStep");
         assert_eq!(
             ld["nutrition"],
