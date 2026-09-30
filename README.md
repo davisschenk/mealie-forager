@@ -87,8 +87,10 @@ header through to `/api/jobs` without its login.
 For an iOS Shortcut that shows up in the share sheet (accepting URLs, Text,
 Images, Media, and Files), add **Get Contents of URL** to
 `https://<host>/api/jobs/upload` with method `POST`, the `Authorization` header,
-and a Form body with a File field named `file` set to Shortcut Input. The same
-shortcut handles links, photos, screenshots, and videos.
+and a Form body. Shortcuts can't send a link in a File field, so branch on
+**Get URLs from Input**. If it finds URLs, send them in a Text field named `url`.
+Otherwise, send Shortcut Input in a File field named `file`. That one shortcut
+handles links, photos, screenshots, and videos.
 
 ## Configuration
 
