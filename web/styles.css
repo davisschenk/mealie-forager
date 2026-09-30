@@ -1159,3 +1159,60 @@ textarea:focus {
     transition: none !important;
   }
 }
+
+.shortcut summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.shortcut summary::-webkit-details-marker {
+  display: none;
+}
+
+.shortcut summary h2 {
+  display: inline;
+}
+
+.shortcut summary h2::after {
+  content: " ▸";
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+.shortcut[open] summary h2::after {
+  content: " ▾";
+}
+
+.shortcut p {
+  margin: 10px 0;
+}
+
+.shortcut-fields {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 10px;
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.shortcut-fields dt {
+  color: var(--muted);
+}
+
+.shortcut-fields dd {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.shortcut-fields code {
+  overflow-wrap: anywhere;
+}
+
+.shortcut-actions {
+  display: flex;
+  gap: 8px;
+}

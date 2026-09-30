@@ -525,6 +525,36 @@ pub async fn log(
     .await?)
 }
 
+fn new_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// The bearer token for API clients such as an iOS Shortcut, created on first use.
+pub async fn api_token(db: &SqlitePool) -> Result<String> {
+    sqlx::query("INSERT OR IGNORE INTO settings (key, value) VALUES ('api_token', ?)")
+        .bind(new_token())
+        .execute(db)
+        .await?;
+    Ok(
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'api_token'")
+            .fetch_one(db)
+            .await?,
+    )
+}
+
+pub async fn rotate_api_token(db: &SqlitePool) -> Result<String> {
+    let token = new_token();
+    sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('api_token', ?)")
+        .bind(&token)
+        .execute(db)
+        .await?;
+    Ok(token)
+}
+
 #[derive(Debug, Serialize, Default)]
 pub struct Stats {
     pub queued: i64,
@@ -691,6 +721,17 @@ mod tests {
             .unwrap()
             .transcript
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn api_token_is_stable_until_rotated() {
+        let db = connect_memory().await.unwrap();
+        let first = api_token(&db).await.unwrap();
+        assert_eq!(first.len(), 64);
+        assert_eq!(api_token(&db).await.unwrap(), first);
+        let rotated = rotate_api_token(&db).await.unwrap();
+        assert_ne!(rotated, first);
+        assert_eq!(api_token(&db).await.unwrap(), rotated);
     }
 
     #[tokio::test]

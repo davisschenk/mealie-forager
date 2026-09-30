@@ -66,6 +66,26 @@
           <button id="submit-btn" class="btn primary" type="submit">Add to queue</button>
         </form>
 
+        <details class="card shortcut" id="shortcut">
+          <summary><h2>iOS Shortcut</h2></summary>
+          <p class="muted small">Send links from the share sheet. In Shortcuts, add <strong>Get Contents of URL</strong> with:</p>
+          <dl class="shortcut-fields">
+            <dt>URL</dt>
+            <dd><code id="sc-endpoint"></code><button type="button" class="btn ghost small" data-copy="sc-endpoint">Copy</button></dd>
+            <dt>Method</dt>
+            <dd><code>POST</code></dd>
+            <dt>Header</dt>
+            <dd><code>Authorization</code> = <code id="sc-auth">Bearer ••••••••</code><button type="button" class="btn ghost small" data-copy="sc-auth">Copy</button></dd>
+            <dt>Body</dt>
+            <dd>JSON, key <code>url</code> = <em>Shortcut Input</em> (optional: <code>tags</code>, <code>note</code>, <code>source</code>)</dd>
+          </dl>
+          <p class="muted small">Turn on “Show in Share Sheet” and accept URLs and text.</p>
+          <div class="shortcut-actions">
+            <button type="button" class="btn ghost small" id="sc-reveal">Show token</button>
+            <button type="button" class="btn ghost small danger" id="sc-rotate">Regenerate</button>
+          </div>
+        </details>
+
         <section class="card insights">
           <h2>Insights <span class="muted small">last 7 days</span></h2>
           <div class="tiles" id="tiles"></div>
