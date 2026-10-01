@@ -175,17 +175,60 @@ async fn pipeline(ctx: &Ctx<'_>) -> Result<String> {
         }
         None => None,
     };
+    if let Some(old) = &job.replaces_slug {
+        ctx.info(format!(
+            "Re-importing; {old} is replaced once the new recipe is in Mealie"
+        ))
+        .await;
+    }
     let slug = match existing {
         Some(slug) => slug,
         None => import(ctx, &job, &mealie).await?,
     };
-    if !state.config.cleanup {
+    let slug = if state.config.cleanup {
+        if job.source == "mealie" {
+            ctx.info("Cleaning a recipe already in Mealie").await;
+        }
+        clean_recipe(ctx, &mealie, &slug, job.note.as_deref()).await?
+    } else {
+        slug
+    };
+    match &job.replaces_slug {
+        Some(old) => replace_old(ctx, &mealie, old, slug).await,
+        None => Ok(slug),
+    }
+}
+
+/// Deletes the recipe a re-import replaces, now that the new one is in place.
+async fn replace_old(
+    ctx: &Ctx<'_>,
+    mealie: &Mealie<'_>,
+    old: &str,
+    slug: String,
+) -> Result<String> {
+    let db = &ctx.state.db;
+    if old == slug {
+        db::clear_replaces(db, ctx.id).await?;
         return Ok(slug);
     }
-    if job.source == "mealie" {
-        ctx.info("Cleaning a recipe already in Mealie").await;
+    if let Err(e) = mealie.delete_recipe(old).await {
+        ctx.warn(format!(
+            "Could not delete the old recipe {old}, so both are in Mealie: {e:#}"
+        ))
+        .await;
+        return Ok(slug);
     }
-    clean_recipe(ctx, &mealie, &slug, job.note.as_deref()).await
+    db::clear_replaces(db, ctx.id).await?;
+    ctx.info(format!("Deleted the old recipe {old}")).await;
+    // The new recipe got a suffixed slug while the old one existed; saving it
+    // again lets the slug follow its name now that the old slug is free.
+    let Some(recipe) = mealie.recipe(&slug).await? else {
+        return Ok(slug);
+    };
+    let saved = mealie.update_recipe(&slug, &recipe).await?;
+    let slug = saved["slug"].as_str().unwrap_or(&slug).to_string();
+    db::set_slug(db, ctx.id, &slug).await?;
+    Ok(slug)
 }
 
 async fn import(ctx: &Ctx<'_>, job: &Job, mealie: &Mealie<'_>) -> Result<String> {

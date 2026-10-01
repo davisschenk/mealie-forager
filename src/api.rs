@@ -69,6 +69,11 @@ pub fn router(state: &AppState) -> Router<AppState> {
             "/api/clean/library",
             get(library_status).post(clean_library),
         )
+        .route("/api/reimport", post(reimport_one))
+        .route(
+            "/api/reimport/library",
+            get(reimport_status).post(reimport_library),
+        )
         .route("/api/token", get(token))
         .route("/api/token/rotate", post(rotate_token))
 }
@@ -395,6 +400,120 @@ async fn clean_library(State(state): State<AppState>) -> ApiResult<Json<serde_js
         }
     }
     tracing::info!("queued {queued} Mealie recipes for cleaning");
+    state.wake.notify_waiters();
+    let _ = state.updates.send(Update::Refresh);
+    Ok(Json(json!({ "queued": queued })))
+}
+
+/// The link a Mealie recipe was imported from, unless it points back at Mealie.
+fn original_url(state: &AppState, recipe: &serde_json::Value) -> Option<String> {
+    let url = urls::normalize(recipe["orgURL"].as_str()?)?;
+    state
+        .config
+        .mealie_slug_from_url(&url)
+        .is_none()
+        .then_some(url)
+}
+
+/// Queues a re-import of a recipe's original link that replaces the recipe.
+async fn insert_reimport(
+    state: &AppState,
+    recipe: &serde_json::Value,
+) -> anyhow::Result<Option<i64>> {
+    let (Some(slug), Some(url)) = (recipe["slug"].as_str(), original_url(state, recipe)) else {
+        return Ok(None);
+    };
+    let source = if urls::is_social(&url) {
+        "social"
+    } else {
+        "web"
+    };
+    // Tags carry over; the clean tag comes back once the new recipe is cleaned.
+    let tags: Vec<String> = recipe["tags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["name"].as_str())
+        .filter(|n| !n.eq_ignore_ascii_case(&state.config.clean_tag))
+        .map(str::to_string)
+        .collect();
+    let id = db::insert_reimport_job(&state.db, &url, source, &tags, slug).await?;
+    Ok(Some(id))
+}
+
+async fn reimport_one(
+    State(state): State<AppState>,
+    Json(req): Json<CleanRequest>,
+) -> ApiResult<(StatusCode, Json<db::Job>)> {
+    let slug = req
+        .slug
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            req.url
+                .as_deref()
+                .and_then(|u| state.config.mealie_slug_from_url(u.trim()))
+        })
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "send a recipe slug or a link to it in Mealie",
+            )
+        })?;
+    if db::pending_reimport_slugs(&state.db).await?.contains(&slug) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "that recipe is already queued for re-import",
+        ));
+    }
+    let recipe = mealie(&state).recipe(&slug).await?.ok_or_else(|| {
+        ApiError::new(StatusCode::NOT_FOUND, format!("no recipe {slug} in Mealie"))
+    })?;
+    let id = insert_reimport(&state, &recipe).await?.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "that recipe has no original link to import from",
+        )
+    })?;
+    created(&state, id).await
+}
+
+/// Mealie recipes with an original link that aren't already queued for re-import.
+async fn reimportable(state: &AppState) -> ApiResult<(usize, Vec<serde_json::Value>)> {
+    let recipes = mealie(state).recipes().await?;
+    let pending = db::pending_reimport_slugs(&state.db).await?;
+    let total = recipes.len();
+    let todo = recipes
+        .into_iter()
+        .filter(|r| original_url(state, r).is_some())
+        .filter(|r| {
+            r["slug"]
+                .as_str()
+                .is_some_and(|s| !pending.iter().any(|p| p == s))
+        })
+        .collect();
+    Ok((total, todo))
+}
+
+async fn reimport_status(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let (total, todo) = reimportable(&state).await?;
+    let queued = db::pending_reimport_slugs(&state.db).await?.len();
+    Ok(Json(json!({
+        "total": total,
+        "reimportable": todo.len(),
+        "queued": queued,
+    })))
+}
+
+async fn reimport_library(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let (_, todo) = reimportable(&state).await?;
+    let mut queued = 0;
+    for recipe in &todo {
+        if insert_reimport(&state, recipe).await?.is_some() {
+            queued += 1;
+        }
+    }
+    tracing::info!("queued {queued} Mealie recipes for re-import");
     state.wake.notify_waiters();
     let _ = state.updates.send(Update::Refresh);
     Ok(Json(json!({ "queued": queued })))
