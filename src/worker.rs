@@ -13,7 +13,7 @@ use crate::{
     db::{self, Job, Stage, Status},
     mealie::{self, Mealie},
     media::{self, Media, MediaInfo},
-    openai::{ExtractInput, OpenAi},
+    openai::{self, ExtractInput, OpenAi},
     state::AppState,
     uploads,
 };
@@ -201,7 +201,11 @@ async fn import(ctx: &Ctx<'_>, job: &Job, mealie: &Mealie<'_>) -> Result<String>
     ctx.enter(Stage::Import).await?;
     ctx.info(format!("Asking Mealie to import {}", job.url))
         .await;
-    match mealie.create_from_url(&job.url).await {
+    let created = match mealie.create_from_url(&job.url).await {
+        Ok(slug) => require_complete(mealie, &slug).await.map(|()| slug),
+        Err(e) => Err(e),
+    };
+    match created {
         Ok(slug) => {
             let host = url::Url::parse(&job.url).ok().and_then(|u| {
                 u.host_str()
@@ -218,6 +222,24 @@ async fn import(ctx: &Ctx<'_>, job: &Job, mealie: &Mealie<'_>) -> Result<String>
             .await;
             import_post(ctx, job, mealie, Some(&message)).await
         }
+    }
+}
+
+/// Deletes a recipe Mealie just created when it has no ingredients or no
+/// instructions, so a failed job doesn't leave a half recipe behind.
+async fn require_complete(mealie: &Mealie<'_>, slug: &str) -> Result<()> {
+    let recipe = mealie
+        .recipe(slug)
+        .await?
+        .ok_or_else(|| anyhow!("Mealie created {slug} but can't find it"))?;
+    let missing = clean::missing_parts(&recipe);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let missing = missing.join(" or ");
+    match mealie.delete_recipe(slug).await {
+        Ok(()) => bail!("Mealie's import has no {missing}, so it was deleted"),
+        Err(e) => bail!("Mealie's import has no {missing}, and deleting {slug} failed: {e:#}"),
     }
 }
 
@@ -302,6 +324,7 @@ async fn import_upload(ctx: &Ctx<'_>, job: &Job, mealie: &Mealie<'_>) -> Result<
                 .await;
             let (stored, bytes) = files.into_iter().next().context("no file uploaded")?;
             let slug = mealie.create_from_zip(stored.name, bytes).await?;
+            require_complete(mealie, &slug).await?;
             finish_mealie_import(ctx, job, mealie, &slug, &kind, Some("Upload")).await
         }
         "video" => import_upload_media(ctx, job, mealie, files).await,
@@ -325,6 +348,7 @@ async fn import_upload(ctx: &Ctx<'_>, job: &Job, mealie: &Mealie<'_>) -> Result<
             .await;
             let content = Some(texts.join("\n\n")).filter(|t| !t.trim().is_empty());
             let slug = mealie.create_with_ai(content, images).await?;
+            require_complete(mealie, &slug).await?;
             finish_mealie_import(ctx, job, mealie, &slug, &kind, Some("Upload")).await
         }
     }
@@ -394,12 +418,7 @@ async fn import_upload_media(
                 })
                 .await?;
             let recipe = extracted.value;
-            if recipe["is_recipe"] == false {
-                let reason = recipe["not_recipe_reason"]
-                    .as_str()
-                    .unwrap_or("no reason given");
-                bail!("no recipe found in this recording: {reason}");
-            }
+            openai::check_recipe(&recipe, "recording")?;
             let name = recipe["name"].as_str().unwrap_or("Untitled recipe");
             db::set_recipe(
                 &state.db,
@@ -596,12 +615,7 @@ async fn import_post(
                 })
                 .await?;
             let recipe = extracted.value;
-            if recipe["is_recipe"] == false {
-                let reason = recipe["not_recipe_reason"]
-                    .as_str()
-                    .unwrap_or("no reason given");
-                bail!("no recipe found in this post: {reason}");
-            }
+            openai::check_recipe(&recipe, "post")?;
             let name = recipe["name"].as_str().unwrap_or("Untitled recipe");
             db::set_recipe(
                 &state.db,
@@ -648,10 +662,14 @@ async fn clean_recipe(
         .recipe(slug)
         .await?
         .ok_or_else(|| anyhow!("recipe {slug} is no longer in Mealie"))?;
-    let lines = clean::original_lines(&recipe);
-    if lines.is_empty() {
-        bail!("the recipe has no ingredients to clean, so it was left untagged");
+    let missing = clean::missing_parts(&recipe);
+    if !missing.is_empty() {
+        bail!(
+            "the recipe has no {}, so it was left untagged",
+            missing.join(" or ")
+        );
     }
+    let lines = clean::original_lines(&recipe);
     let units = clean::usable_units(mealie.units().await?);
     let categories = mealie.categories().await?;
     ctx.info(format!(

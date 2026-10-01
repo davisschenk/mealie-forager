@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- A job fails instead of importing a recipe with no ingredients or no
+  instructions. Recipes Mealie creates that way (web scrapes, AI and zip
+  imports) are deleted again; a web page falls back to the post pipeline.
+- A post with several separate recipes fails with their names instead of
+  importing only one. A note naming the one you want imports just that one.
+  The Clean stage also refuses recipes that mix several dishes.
+
 ### Added
 
 - Docker image (`ghcr.io/davisschenk/mealie-forager`, amd64 and arm64), a

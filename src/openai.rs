@@ -7,7 +7,9 @@ use crate::config::Config;
 
 const SYSTEM_PROMPT: &str = "You turn social-media cooking posts into clean recipes.\n\
 You receive the post caption, a transcript of the spoken audio, and sometimes images.\n\
-- Set is_recipe to false (with a short reason) only if there is no dish that can be cooked from the content.\n\
+- Set is_recipe to false (with a short reason) if there is no dish that can be cooked from the content.\n\
+- A recipe needs both its ingredients and its method from the content. Ingredients named only in the spoken steps count, and so do steps that are only shown or narrated. If the ingredients or the method are missing (only the finished dish is shown, only ingredients are listed, \"recipe in bio\", a teaser for another post), set is_recipe to false and say which part is missing. Never invent a missing ingredient list or method; only quantities may be estimated.\n\
+- recipe_names lists the name of every separate dish the content gives a recipe for. Components of one dish (a sauce, dough, marinade, topping or the side it is served with) are part of that dish, not separate recipes. If the user instructions pick one dish, extract only that one and list only it. If there are several separate dishes, list them all and fill the other fields with the first one.\n\
 - Merge caption and transcript; prefer explicit quantities from either. When quantities are missing, give reasonable estimates and mark them with \"(approx.)\".\n\
 - Write each ingredient as one line: quantity, unit, ingredient, preparation (e.g. \"2 tbsp olive oil\", \"1 onion, finely diced\").\n\
 - Write short, imperative instruction steps in cooking order. Do not reference the video, creator or social platform.\n\
@@ -26,13 +28,14 @@ pub fn recipe_schema() -> Value {
         "type": "object",
         "additionalProperties": false,
         "required": [
-            "is_recipe", "not_recipe_reason", "name", "description", "recipeYield",
+            "is_recipe", "not_recipe_reason", "recipe_names", "name", "description", "recipeYield",
             "prepTime", "cookTime", "totalTime", "recipeIngredient", "recipeInstructions",
             "keywords", "nutrition"
         ],
         "properties": {
             "is_recipe": { "type": "boolean" },
             "not_recipe_reason": nullable_string(),
+            "recipe_names": { "type": "array", "items": { "type": "string" } },
             "name": { "type": "string" },
             "description": { "type": "string" },
             "recipeYield": nullable_string(),
@@ -68,6 +71,52 @@ pub fn recipe_schema() -> Value {
             }
         }
     })
+}
+
+/// Rejects an extraction that isn't exactly one complete recipe; `source` names
+/// what was read ("post", "recording") for the error message.
+pub fn check_recipe(recipe: &Value, source: &str) -> Result<()> {
+    if recipe["is_recipe"] == false {
+        let reason = recipe["not_recipe_reason"]
+            .as_str()
+            .unwrap_or("no reason given");
+        bail!("no recipe found in this {source}: {reason}");
+    }
+    let names: Vec<&str> = recipe["recipe_names"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n.as_str().map(str::trim).filter(|n| !n.is_empty()))
+        .collect();
+    if names.len() > 1 {
+        bail!(
+            "this {source} has {} separate recipes ({}); Forager imports one recipe per job, \
+             so submit it again with a note naming the one you want",
+            names.len(),
+            names.join(", ")
+        );
+    }
+    let filled = |field: &str, key: Option<&str>| {
+        recipe[field].as_array().into_iter().flatten().any(|v| {
+            key.map_or(v, |k| &v[k])
+                .as_str()
+                .is_some_and(|t| !t.trim().is_empty())
+        })
+    };
+    let mut missing = Vec::new();
+    if !filled("recipeIngredient", None) {
+        missing.push("ingredients");
+    }
+    if !filled("recipeInstructions", Some("text")) {
+        missing.push("instructions");
+    }
+    if !missing.is_empty() {
+        bail!(
+            "the recipe in this {source} has no {}, so it wasn't imported",
+            missing.join(" or ")
+        );
+    }
+    Ok(())
 }
 
 pub struct ExtractInput<'a> {
@@ -301,6 +350,44 @@ mod tests {
     #[test]
     fn schema_requires_every_property() {
         assert_strict(&recipe_schema(), "recipe");
+    }
+
+    fn extracted(ingredients: Value, steps: Value, names: Value) -> Value {
+        json!({
+            "is_recipe": true, "not_recipe_reason": null, "recipe_names": names,
+            "recipeIngredient": ingredients, "recipeInstructions": steps,
+        })
+    }
+
+    #[test]
+    fn check_recipe_accepts_one_complete_recipe() {
+        let ok = extracted(json!(["1 egg"]), json!([{"text": "Fry."}]), json!(["Egg"]));
+        assert!(check_recipe(&ok, "post").is_ok());
+        // Recipes extracted before recipe_names existed still pass.
+        let mut old = ok.clone();
+        old.as_object_mut().unwrap().remove("recipe_names");
+        assert!(check_recipe(&old, "post").is_ok());
+    }
+
+    #[test]
+    fn check_recipe_rejects_incomplete_or_several() {
+        let err = |r: Value| check_recipe(&r, "post").unwrap_err().to_string();
+        let steps = json!([{"text": "Fry."}]);
+        assert!(err(extracted(json!([]), steps.clone(), json!(["Egg"]))).contains("no ingredients"));
+        assert!(err(extracted(
+            json!(["1 egg"]),
+            json!([{"text": " "}]),
+            json!(["Egg"])
+        ))
+        .contains("no instructions"));
+        assert!(err(extracted(json!([" "]), json!([]), json!([])))
+            .contains("no ingredients or instructions"));
+        assert!(
+            err(extracted(json!(["1 egg"]), steps, json!(["Egg", "Toast"])))
+                .contains("2 separate recipes (Egg, Toast)")
+        );
+        let none = json!({"is_recipe": false, "not_recipe_reason": "just a vlog"});
+        assert!(err(none).contains("just a vlog"));
     }
 
     #[test]

@@ -202,6 +202,13 @@ impl Mealie<'_> {
             .await
     }
 
+    /// Deletes a recipe; one that is already gone counts as deleted.
+    pub async fn delete_recipe(&self, slug: &str) -> Result<()> {
+        self.send(self.http.delete(self.url(&format!("/api/recipes/{slug}"))))
+            .await?;
+        Ok(())
+    }
+
     /// Replaces the whole recipe; returns it as saved (the slug follows the name).
     pub async fn update_recipe(&self, slug: &str, recipe: &Value) -> Result<Value> {
         self.call(
