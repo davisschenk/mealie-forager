@@ -324,7 +324,7 @@ function renderDrawer() {
     actions.push(`<button class="btn small ghost" data-act="retry-fresh" title="Discard cached transcript and recipe">Retry from scratch</button>`);
   }
   if (j.status === "succeeded" && state.config.cleanup) actions.push(`<button class="btn small ghost" data-act="retry" title="Clean the Mealie recipe again">Re-run cleanup</button>`);
-  if (j.status === "succeeded") actions.push(`<button class="btn small ghost" data-act="retry-fresh">Re-import</button>`);
+  if (j.status === "succeeded" && j.source !== "mealie") actions.push(`<button class="btn small ghost" data-act="retry-fresh" title="Import again from the original link and replace the recipe in Mealie">Re-import</button>`);
   if (j.status === "queued" || j.status === "running") actions.push(`<button class="btn small danger" data-act="cancel"><svg class="icon"><use href="#i-stop"/></svg> Cancel</button>`);
   else actions.push(`<button class="btn small ghost danger" data-act="delete"><svg class="icon"><use href="#i-trash"/></svg> Remove</button>`);
 
@@ -681,8 +681,10 @@ $("#submit").addEventListener("drop", (e) => {
 let libraryTodo = 0;
 
 async function loadLibrary() {
-  if (!state.config.cleanup) return;
   $("#library").hidden = false;
+  loadReimport();
+  if (!state.config.cleanup) return;
+  $("#library-cleanup").hidden = false;
   try {
     const s = await api("/api/clean/library");
     libraryTodo = s.uncleaned;
@@ -719,6 +721,58 @@ $("#library-clean").addEventListener("click", async () => {
     toast(e.message, { kind: "bad" });
   } finally {
     btn.disabled = false;
+  }
+});
+
+let reimportTodo = 0;
+
+async function loadReimport() {
+  try {
+    const s = await api("/api/reimport/library");
+    reimportTodo = s.reimportable;
+    const parts = [`${s.reimportable + s.queued} of ${s.total} recipes have an original link.`];
+    if (s.queued) parts.push(`${s.queued} queued for re-import.`);
+    $("#reimport-status").textContent = parts.join(" ");
+    $("#reimport-all").hidden = !s.reimportable;
+    $("#reimport-all").textContent = `Re-import ${s.reimportable} recipe${s.reimportable === 1 ? "" : "s"}`;
+  } catch (e) {
+    $("#reimport-status").textContent = `Couldn't read the library: ${e.message}`;
+  }
+}
+
+async function queuedReimport(message) {
+  toast(message);
+  if (state.filter !== "all" && state.filter !== "active") setFilter("active");
+  await loadJobs();
+  loadReimport();
+}
+
+$("#reimport-all").addEventListener("click", async () => {
+  const n = reimportTodo;
+  if (!confirm(`Re-import ${n} recipe${n === 1 ? "" : "s"} from their original links? Each one is downloaded and extracted again (several AI calls each) and then replaces the old recipe, which loses its ratings, comments and meal plans.`)) return;
+  const btn = $("#reimport-all");
+  btn.disabled = true;
+  try {
+    const { queued } = await api("/api/reimport/library", { method: "POST" });
+    await queuedReimport(`Queued ${queued} recipe${queued === 1 ? "" : "s"} for re-import`);
+  } catch (e) {
+    toast(e.message, { kind: "bad" });
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$("#reimport-one").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = $("#reimport-link");
+  const url = input.value.trim();
+  if (!url) return;
+  try {
+    const job = await api("/api/reimport", { method: "POST", body: JSON.stringify({ url }) });
+    input.value = "";
+    await queuedReimport(`Re-importing ${job.url}`);
+  } catch (err) {
+    toast(err.message, { kind: "bad" });
   }
 });
 

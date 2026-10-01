@@ -1283,3 +1283,28 @@ textarea:focus {
 .library p {
   margin: 8px 0;
 }
+
+.library h3 {
+  margin: 16px 0 0;
+  font-size: 0.95rem;
+}
+
+.reimport-one {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.reimport-one input {
+  flex: 1;
+  min-width: 0;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 7px 10px;
+  outline: none;
+}
+
+.reimport-one input:focus {
+  border-color: var(--accent);
+}

@@ -104,6 +104,8 @@ pub struct Job {
     pub media_kind: Option<String>,
     pub recipe_name: Option<String>,
     pub mealie_slug: Option<String>,
+    /// The Mealie recipe this job re-imports; it's deleted once the job succeeds.
+    pub replaces_slug: Option<String>,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     pub created_at: i64,
@@ -128,7 +130,7 @@ pub struct Job {
 const SUMMARY_COLUMNS: &str =
     "id, url, source, tags, note, status, stage, progress, attempts, error, \
     error_stage, title, platform, uploader, thumbnail, duration_secs, media_kind, recipe_name, \
-    mealie_slug, prompt_tokens, completion_tokens, created_at, started_at, finished_at, updated_at";
+    mealie_slug, replaces_slug, prompt_tokens, completion_tokens, created_at, started_at, finished_at, updated_at";
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct StageRun {
@@ -285,6 +287,35 @@ pub async fn pending_clean_slugs(db: &SqlitePool) -> Result<Vec<String>> {
     .await?)
 }
 
+/// Queues an import of a recipe's original link that replaces the recipe.
+pub async fn insert_reimport_job(
+    db: &SqlitePool,
+    url: &str,
+    source: &str,
+    tags: &[String],
+    replaces: &str,
+) -> Result<i64> {
+    let mut tx = db.begin().await?;
+    let id = insert_job(&mut *tx, url, source, tags, None).await?;
+    sqlx::query("UPDATE jobs SET replaces_slug = ? WHERE id = ?")
+        .bind(replaces)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Slugs that already have a re-import waiting or running.
+pub async fn pending_reimport_slugs(db: &SqlitePool) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT replaces_slug FROM jobs WHERE replaces_slug IS NOT NULL \
+         AND status IN ('queued', 'running')",
+    )
+    .fetch_all(db)
+    .await?)
+}
+
 /// Jobs left running by a crash or restart go back to the front of the queue.
 pub async fn requeue_interrupted(db: &SqlitePool) -> Result<u64> {
     let now = now_ms();
@@ -425,6 +456,15 @@ pub async fn set_slug(db: &SqlitePool, id: i64, slug: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn clear_replaces(db: &SqlitePool, id: i64) -> Result<()> {
+    sqlx::query("UPDATE jobs SET replaces_slug = NULL, updated_at = ? WHERE id = ?")
+        .bind(now_ms())
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 pub async fn set_recipe_name(db: &SqlitePool, id: i64, name: &str) -> Result<()> {
     sqlx::query("UPDATE jobs SET recipe_name = ?, updated_at = ? WHERE id = ?")
         .bind(name)
@@ -505,7 +545,9 @@ pub async fn requeue(db: &SqlitePool, id: i64, fresh: bool) -> Result<bool> {
          uploader = NULL, thumbnail = NULL, \
          duration_secs = NULL, description = NULL, images = NULL, \
          transcript = NULL, recipe_json = NULL, recipe_name = NULL, \
-         mealie_slug = CASE WHEN source = 'mealie' THEN mealie_slug END"
+         mealie_slug = CASE WHEN source = 'mealie' THEN mealie_slug END, \
+         replaces_slug = CASE WHEN status = 'succeeded' AND source != 'mealie' \
+           THEN mealie_slug ELSE replaces_slug END"
     } else {
         ""
     };
@@ -789,6 +831,43 @@ mod tests {
         assert_eq!(upload.title.as_deref(), Some("t"));
         let web = get_full(&db, web).await.unwrap().unwrap();
         assert!(web.media_kind.is_none() && web.title.is_none());
+    }
+
+    #[tokio::test]
+    async fn fresh_retry_of_an_import_replaces_its_recipe() {
+        let db = connect_memory().await.unwrap();
+        let id = insert_job(&db, "https://a", "web", &[], None)
+            .await
+            .unwrap();
+        finish(&db, id, Status::Succeeded, Stage::Done, None, Some("soup"))
+            .await
+            .unwrap();
+        assert!(requeue(&db, id, true).await.unwrap());
+        let job = get_full(&db, id).await.unwrap().unwrap();
+        assert!(job.mealie_slug.is_none());
+        assert_eq!(job.replaces_slug.as_deref(), Some("soup"));
+        assert_eq!(pending_reimport_slugs(&db).await.unwrap(), ["soup"]);
+
+        // A failed re-import keeps the recipe it still has to replace.
+        finish(
+            &db,
+            id,
+            Status::Failed,
+            Stage::Import,
+            Some(("import", "x")),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(requeue(&db, id, true).await.unwrap());
+        let job = get_full(&db, id).await.unwrap().unwrap();
+        assert_eq!(job.replaces_slug.as_deref(), Some("soup"));
+
+        let other = insert_reimport_job(&db, "https://b", "social", &[], "stew")
+            .await
+            .unwrap();
+        let job = get_full(&db, other).await.unwrap().unwrap();
+        assert_eq!(job.replaces_slug.as_deref(), Some("stew"));
     }
 
     #[tokio::test]

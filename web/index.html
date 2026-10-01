@@ -100,9 +100,19 @@
 
         <section class="card library" id="library" hidden>
           <h2>Mealie library</h2>
-          <p class="muted small" id="library-status">Checking your recipes…</p>
-          <button type="button" class="btn small" id="library-clean" hidden>Clean all</button>
-          <p class="muted small">To clean one recipe, paste its Mealie link in the import box above.</p>
+          <div id="library-cleanup" hidden>
+            <p class="muted small" id="library-status">Checking your recipes…</p>
+            <button type="button" class="btn small" id="library-clean" hidden>Clean all</button>
+            <p class="muted small">To clean one recipe, paste its Mealie link in the import box above.</p>
+          </div>
+          <h3>Re-import</h3>
+          <p class="muted small">Imports recipes again from their original links and replaces them in Mealie. Tags carry over; ratings, comments and meal plans on the old recipe don't. The old recipe is only deleted once the new one has been imported.</p>
+          <p class="muted small" id="reimport-status">Checking your recipes…</p>
+          <button type="button" class="btn small" id="reimport-all" hidden>Re-import all</button>
+          <form class="reimport-one" id="reimport-one">
+            <input id="reimport-link" type="text" placeholder="Mealie recipe link" aria-label="Mealie recipe link to re-import" />
+            <button type="submit" class="btn small ghost">Re-import</button>
+          </form>
         </section>
 
         <section class="card insights">

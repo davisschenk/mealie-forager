@@ -13,6 +13,11 @@
 
 ### Added
 
+- Re-import recipes from their original links, one at a time or the whole
+  library (`POST /api/reimport`, `GET`/`POST /api/reimport/library`, and the
+  "Mealie library" panel). The new recipe replaces the old one, which is only
+  deleted once the import succeeds. A job's **Re-import** button now replaces
+  its recipe too, instead of leaving a duplicate.
 - Docker image (`ghcr.io/davisschenk/mealie-forager`, amd64 and arm64), a
   `docker-compose.yml`, and a commented `.env.example`.
 - `AUTH_PASSWORD`: an optional built-in login for the web UI and API.
