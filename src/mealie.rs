@@ -350,9 +350,29 @@ pub fn merge_tags(recipe: &mut Value, add: &[Value], drop_hashtags: bool) {
     recipe["tags"] = Value::Array(tags);
 }
 
+/// `original` when `name` is the "<original> (n)" Mealie gives a recipe created
+/// while another with the same name exists.
+pub fn without_copy_number<'a>(name: &str, original: &'a str) -> Option<&'a str> {
+    let number = name
+        .strip_prefix(original)?
+        .strip_prefix(" (")?
+        .strip_suffix(')')?;
+    (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())).then_some(original)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_numbers_are_recognised() {
+        assert_eq!(without_copy_number("Soup (1)", "Soup"), Some("Soup"));
+        assert_eq!(without_copy_number("Soup (12)", "Soup"), Some("Soup"));
+        assert_eq!(without_copy_number("Soup (vegan)", "Soup"), None);
+        assert_eq!(without_copy_number("Soup ()", "Soup"), None);
+        assert_eq!(without_copy_number("Stew (1)", "Soup"), None);
+        assert_eq!(without_copy_number("Soup", "Soup"), None);
+    }
 
     #[test]
     fn builds_json_ld_and_merges_tags() {

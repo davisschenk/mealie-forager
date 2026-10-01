@@ -185,21 +185,22 @@ async fn pipeline(ctx: &Ctx<'_>) -> Result<String> {
         Some(slug) => slug,
         None => import(ctx, &job, &mealie).await?,
     };
-    let slug = if state.config.cleanup {
-        if job.source == "mealie" {
-            ctx.info("Cleaning a recipe already in Mealie").await;
-        }
-        clean_recipe(ctx, &mealie, &slug, job.note.as_deref()).await?
-    } else {
-        slug
+    // The old recipe goes before the cleanup: while it exists, Mealie refuses
+    // to save the new one under the same name.
+    let slug = match &job.replaces_slug {
+        Some(old) => replace_old(ctx, &mealie, old, slug).await?,
+        None => slug,
     };
-    match &job.replaces_slug {
-        Some(old) => replace_old(ctx, &mealie, old, slug).await,
-        None => Ok(slug),
+    if !state.config.cleanup {
+        return Ok(slug);
     }
+    if job.source == "mealie" {
+        ctx.info("Cleaning a recipe already in Mealie").await;
+    }
+    clean_recipe(ctx, &mealie, &slug, job.note.as_deref()).await
 }
 
-/// Deletes the recipe a re-import replaces, now that the new one is in place.
+/// Deletes the recipe a re-import replaces, now that the new one is imported.
 async fn replace_old(
     ctx: &Ctx<'_>,
     mealie: &Mealie<'_>,
@@ -211,20 +212,28 @@ async fn replace_old(
         db::clear_replaces(db, ctx.id).await?;
         return Ok(slug);
     }
-    if let Err(e) = mealie.delete_recipe(old).await {
-        ctx.warn(format!(
-            "Could not delete the old recipe {old}, so both are in Mealie: {e:#}"
-        ))
-        .await;
-        return Ok(slug);
-    }
+    let old_name = mealie
+        .recipe(old)
+        .await?
+        .and_then(|r| r["name"].as_str().map(str::to_string));
+    mealie
+        .delete_recipe(old)
+        .await
+        .with_context(|| format!("could not delete the old recipe {old}"))?;
     db::clear_replaces(db, ctx.id).await?;
     ctx.info(format!("Deleted the old recipe {old}")).await;
-    // The new recipe got a suffixed slug while the old one existed; saving it
-    // again lets the slug follow its name now that the old slug is free.
-    let Some(recipe) = mealie.recipe(&slug).await? else {
+    // Mealie named the new recipe "<name> (1)" while the old one existed; saving
+    // it under the old name lets the slug follow now that it's free.
+    let Some(mut recipe) = mealie.recipe(&slug).await? else {
         return Ok(slug);
     };
+    if let Some(base) = old_name
+        .as_deref()
+        .zip(recipe["name"].as_str())
+        .and_then(|(old, name)| mealie::without_copy_number(name, old))
+    {
+        recipe["name"] = json!(base);
+    }
     let saved = mealie.update_recipe(&slug, &recipe).await?;
     let slug = saved["slug"].as_str().unwrap_or(&slug).to_string();
     db::set_slug(db, ctx.id, &slug).await?;

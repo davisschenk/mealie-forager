@@ -97,9 +97,10 @@ and `GET`/`POST /api/clean/library`. Clean-only jobs wait behind new imports.
 `orgURL`) and replaces it. The "Mealie library" panel re-imports one recipe from
 its Mealie link, or every recipe that has an original link; the **Re-import**
 button on a finished job does the same for that job's recipe. A re-import is a
-normal import job that carries over the old recipe's tags. Only after the new
-recipe is imported (and cleaned) is the old one deleted, so a failed re-import
-leaves it untouched. Ratings, comments and meal-plan entries on the old recipe
+normal import job that carries over the old recipe's tags. The old recipe is
+deleted once the new one is imported, before the cleanup (Mealie won't save two
+recipes with the same name), so a failed download or extraction leaves it
+untouched. Ratings, comments and meal-plan entries on the old recipe
 are lost. Recipes made from photos or text have no original link and are
 skipped. The API equivalents are `POST /api/reimport` (`{"slug": …}` or
 `{"url": …}`) and `GET`/`POST /api/reimport/library`.
