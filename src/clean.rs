@@ -39,7 +39,7 @@ Metadata:\n\
 \n\
 Categories: pick 1-3 categories for the dish from the supplied category list (e.g. meal type, course, cuisine, whatever the list covers), copying names exactly. Keep the recipe's current categories in mind and don't repeat them. Never invent categories; use [] when none fit or no list is supplied.\n\
 \n\
-Set cannot_clean to a short reason only if the recipe is too incomplete to clean (for example no ingredients at all); otherwise null.\n\
+Set cannot_clean to a short reason only if the recipe is too incomplete to clean (no ingredients or no instructions at all), or if it mixes several separate dishes that belong in separate recipes (components of one dish, like a sauce, dough or topping, are fine); otherwise null.\n\
 Write in the language of the recipe.";
 
 pub const MATCH_PROMPT: &str = "You link recipe ingredients to foods in a Mealie database.\n\
@@ -276,6 +276,23 @@ pub fn original_lines(recipe: &Value) -> Vec<Line> {
             })
         })
         .collect()
+}
+
+/// What a recipe lacks to be usable: "ingredients" and/or "instructions".
+pub fn missing_parts(recipe: &Value) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if original_lines(recipe).is_empty() {
+        missing.push("ingredients");
+    }
+    let has_steps = recipe["recipeInstructions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|s| text(&s["text"]).is_some());
+    if !has_steps {
+        missing.push("instructions");
+    }
+    missing
 }
 
 fn text_owned(v: &Value) -> Option<String> {
@@ -701,6 +718,21 @@ mod tests {
             json!({"id": "u2", "name": "tbsp", "pluralName": null, "abbreviation": ""}),
             json!({"id": "u3", "name": "cup", "pluralName": "cups", "abbreviation": "c"}),
         ]
+    }
+
+    #[test]
+    fn missing_parts_finds_empty_ingredients_and_steps() {
+        let full = json!({
+            "recipeIngredient": [{"display": "1 egg"}],
+            "recipeInstructions": [{"text": "Fry."}],
+        });
+        assert!(missing_parts(&full).is_empty());
+        let empty = json!({
+            "recipeIngredient": [{"display": "", "note": null}],
+            "recipeInstructions": [{"text": "  "}],
+        });
+        assert_eq!(missing_parts(&empty), ["ingredients", "instructions"]);
+        assert_eq!(missing_parts(&json!({})), ["ingredients", "instructions"]);
     }
 
     #[test]

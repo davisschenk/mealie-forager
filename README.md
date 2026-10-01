@@ -39,7 +39,8 @@ sites (TikTok, Instagram, YouTube, Facebook, Pinterest, X, Reddit, …) take the
 `source` field of `POST /api/jobs` (`auto`, `social`, or `web`) can override that.
 
 **Web** jobs go straight to Import, where Mealie's own scraper
-(`/api/recipes/create/url`) imports the page. If Mealie can't scrape it, the job
+(`/api/recipes/create/url`) imports the page. If Mealie can't scrape it, or the
+recipe it creates has no ingredients or no instructions (it is deleted again), the job
 falls back to the social path.
 
 **Social** jobs run through these stages. The queue records how long each stage took.
@@ -49,7 +50,7 @@ falls back to the social path.
 | Fetch      | `yt-dlp --dump-single-json` reads the caption and metadata. If that fails, `gallery-dl` handles image posts. |
 | Download   | `yt-dlp` downloads the best audio track (with live progress), and `ffmpeg` re-encodes it to 16 kHz mono MP3. |
 | Transcribe | The OpenAI `/audio/transcriptions` endpoint transcribes the audio.           |
-| Extract    | `/chat/completions` with a strict JSON schema returns the recipe, or reports that the post has none. |
+| Extract    | `/chat/completions` with a strict JSON schema returns the recipe, or reports that the post has none. The job fails when the recipe has no ingredients or no instructions, or when the post has several separate recipes (add a note naming the one you want and submit it again). |
 | Import     | The recipe is sent to Mealie's `/api/recipes/create/html-or-json` as schema.org JSON-LD. |
 
 **Uploads** (`POST /api/jobs/upload`, or attach/drop files in the UI) go by file type:
